@@ -1,6 +1,7 @@
 # 本地样本数据与运行产物，不入库
 input/
 output/
+bscat_monitor_*.zip
 
 # 本机数据库连接配置
 hive_config.py

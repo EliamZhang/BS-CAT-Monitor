@@ -5,7 +5,8 @@ BSCAT 分类模型效果监控
 
 启动时先执行 src/sync.py 到线上取数：5 张 dash 表写入 input/；
 随后聚合出监控指标，渲染成单文件 HTML 看板，文件名为
-output/bscat_monitor_<运行时间戳>.html。
+output/bscat_monitor_<运行时间戳>.html；最后把 input/ 下的 CSV 与这个
+HTML 一起打包成 bscat_monitor_<同一时间戳>.zip，放在项目根目录。
 
 用法:
     python monitor.py
@@ -20,6 +21,7 @@ import math
 import re
 import statistics
 import sys
+import zipfile
 from datetime import datetime
 from pathlib import Path
 
@@ -2106,6 +2108,20 @@ def render(payload: dict, template: str) -> str:
     return template.replace("/*__PAYLOAD__*/null/*__ENDPAYLOAD__*/", blob)
 
 
+def archive_run(root: Path, in_dir: Path, out_html: Path, ts: datetime) -> tuple[Path, int]:
+    """把本期取数件和页面打成一个 zip 放到项目根目录，文件名沿用页面的时间戳。
+
+    zip 内平铺（不带 input/ 前缀）：解包后 CSV 与 HTML 在同一层，直接可用。
+    """
+    csvs = sorted(in_dir.glob("*.csv"))
+    zip_path = root / f"bscat_monitor_{ts:%Y%m%d_%H%M%S}.zip"
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for csv in csvs:
+            zf.write(csv, arcname=csv.name)
+        zf.write(out_html, arcname=out_html.name)
+    return zip_path, len(csvs)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="BSCAT 分类模型效果监控")
     ap.add_argument("--skip-sync", action="store_true",
@@ -2772,9 +2788,14 @@ def main() -> int:
     tpl = tpl_path.read_text(encoding="utf-8")
     html = render(payload, tpl)
 
-    out_html = out_dir / f"bscat_monitor_{datetime.now():%Y%m%d_%H%M%S}.html"
+    ts = datetime.now()
+    out_html = out_dir / f"bscat_monitor_{ts:%Y%m%d_%H%M%S}.html"
     out_html.write_text(html, encoding="utf-8")
     log(f"生成 {out_html}  ({len(html.encode('utf-8'))/1024/1024:.1f} MB)")
+
+    zip_path, n_csv = archive_run(root, in_dir, out_html, ts)
+    log(f"归档 {zip_path}（{n_csv} 个 CSV + 1 个 HTML，"
+        f"{zip_path.stat().st_size/1024/1024:.1f} MB）")
     return 0
 
 
