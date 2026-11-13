@@ -412,10 +412,10 @@ SELECT * FROM model.tmp_eliam_risk_000008_log_liability_summary_stage
 --             窗口覆盖到的天，历史天不动）**
 --               ..._dash_base         口径基座（clean/normalize/status/大类）
 --               ..._dash_summary      核心指标         每天 15 行 x  8 列
---               ..._dash_category     逐Category差异   每天 各Category一行 x 34 列
---               ..._dash_flow         差异流向        每天 各流向一行 x 16 列
+--               ..._dash_category     逐Category差异   每天 各Category一行 x 33 列
+--               ..._dash_flow         差异流向        每天 各流向一行 x 14 列
 --               ..._dash_group        业务大类聚类      每天 6 行 x 20 列
---               ..._dash_detail       逐笔排查明细      每天 各差异笔一行 x 23 列
+--               ..._dash_detail       逐笔排查明细      每天 各差异笔一行 x 22 列
 --               ..._dash_trend        按日趋势          每天一行 x 12 列
 --             临时 stage（每次 DROP 重建，可随时手删，不算产出）
 --               ..._dash_<用途>_stage
@@ -425,7 +425,7 @@ SELECT * FROM model.tmp_eliam_risk_000008_log_liability_summary_stage
 --        （那是 report_table.sql 每跑一次重建的、只装本批窗口的中间表）。
 --        所以正确顺序永远是：先 report_table.sql，再本文件。
 --     2. **七张 dash 表全部按天累积**：五张看板（summary/category/flow/group/
---        detail）都改成「每天一组行」——优先级切点、差异贡献率等也是**各天内部**
+--        detail）都改成「每天一组行」——差异贡献率等也是**各天内部**
 --        计算（= 原来「一批一次」的语义，线上每天跑一批，效果一致），每张表都
 --        带 sample_datetime 列、按 sample_datetime 分区。重跑同一批 = 只替换那几天的分区。
 --        base / trend 同理（trend 本来就是按天）。不删任何表对象。
@@ -441,6 +441,13 @@ SELECT * FROM model.tmp_eliam_risk_000008_log_liability_summary_stage
 --     "table ... is not partitioned"（不会静默写错位数据）；D7 的
 --     SHOW PARTITIONS 守卫也会报同样的错。
 --
+--  ⚠️⚠️ **2026-11-13 删了 3 个优先级列**（dash_category 的「建议优先级」、
+--     dash_flow 的「排名」/「建议优先级」、dash_detail 的「排查优先级」）。
+--     三张目标表由 CREATE TABLE IF NOT EXISTS 建，线上旧表还带着这些列，
+--     直接跑 INSERT 会因列数不符报错。上线前对这三张表做一次性重建
+--     （DROP 后重跑本文件）；重建会丢掉这三张表的历史分区，要保留就先备份，
+--     或用更宽的 log_run 窗口重跑补齐。
+--
 --  ⚠️⚠️ **必须「本文件全选 + 一次执行」**。STEP A0 把
 --     spark.sql.sources.partitionOverwriteMode 设成 DYNAMIC；没有它，
 --     base / trend 的 INSERT OVERWRITE 会先清掉所有分区再写窗口，历史全丢。
@@ -452,9 +459,9 @@ SELECT * FROM model.tmp_eliam_risk_000008_log_liability_summary_stage
 --  （见 sql/99_dryrun_dashboard.py）。改口径要同步改那个脚本再跑一遍。
 --
 --  四处**刻意的**与 Python 版不一致：
---    1. dash_detail 是 22 列（另加 sample_datetime 列 = 23 列）而非 28 列——线上日志没有
+--    1. dash_detail 是 21 列（另加 sample_datetime 列 = 22 列）而非 28 列——线上日志没有
 --       account_type、classification_status / engine / rule_id / reason、
---       sample_datetime 这 6 列。
+--       sample_datetime 这 6 列，另删掉「排查优先级」1 列（2026-11-13，P 档由看板自己定）。
 --    2. dash_trend 是新增的：原 04_模型监控 sheet 靠本地 .monitor/snapshots.jsonl
 --       存历史，线上没有这个文件，改成按 sample_datetime 分批。原版的「引擎命中率趋势」
 --       做不了（classification_engine 不在日志里）。
@@ -472,7 +479,7 @@ SELECT * FROM model.tmp_eliam_risk_000008_log_liability_summary_stage
 --     在 FileFormatWriter.write 里无条件检查（跟文件格式无关，USING PARQUET 也躲不掉），
 --     命中就抛 [INVALID_COLUMN_NAME_AS_PATH]，而且 **按 schema 顺序遇到第一个就抛**,
 --     所以报错只显示一个名字，不代表只有一列有问题。汉字是合法的（dash_flow 的
---     `排名` / `建议优先级` 都通过了检查），**只有空格这类字符不行**。
+--     `是否关键Category` / `差异类型` 都通过了检查），**只有空格这类字符不行**。
 --     sql/97_lint_incremental.py 会静态检查产出列名。
 --     注意：只有**产出列名**受限，字符串字面量里的空格随便写。
 --
@@ -775,13 +782,14 @@ SELECT * FROM model.tmp_eliam_risk_000008_dash_summary_stage
 
 
 -- ---------------------------------------------------------------------------
--- STEP D2  dash_category  逐 Category 差异与优化优先级（33 列 + sample_datetime = 34 列）
+-- STEP D2  dash_category  逐 Category 差异（32 列 + sample_datetime = 33 列）
 --   对应 label_compare.compute_category_comparison_v2
 --
---   优先级切点用**精确分位数**（pandas quantile 是线性插值），不用
---   percentile_approx——后者返回真实数据点而非插值，边界上会把 P1/P2 判错。
+--   2026-11-13 起不再输出「建议优先级」：类别 P 档由看板自己按业务板块定
+--   （monitor.py 的 LEVEL_BY_SEGMENT），上游这套按分位数切 P1/P2/P3 的判定
+--   连同切点计算一并删掉。
 --
---   **按天**：同一套口径按 sample_datetime 各算一份（优先级切点也是各天内部算），
+--   **按天**：同一套口径按 sample_datetime 各算一份，
 --   行 = （sample_datetime, Category），按 sample_datetime 分区增量。
 -- ---------------------------------------------------------------------------
 DROP TABLE IF EXISTS model.tmp_eliam_risk_000008_dash_category_stage;
@@ -944,38 +952,11 @@ raw AS (
   LEFT JOIN if_a  ON if_a.sample_datetime  = ks.sample_datetime AND if_a.k  = ks.k
   JOIN tot        ON tot.sample_datetime   = ks.sample_datetime
 ),
--- 优先级切点：positive = 差异数>0；high = q0.75，medium = median（线性插值）
--- 按天各算一份：切点 = 该天内部的分位数
-pos AS (
-  SELECT sample_datetime, ref_diff_cnt AS v,
-         ROW_NUMBER() OVER (PARTITION BY sample_datetime ORDER BY ref_diff_cnt) - 1 AS idx,
-         COUNT(*) OVER (PARTITION BY sample_datetime) AS n
-  FROM raw WHERE ref_diff_cnt > 0
-),
-cut AS (
-  SELECT
-    sample_datetime,
-    MAX(n) AS n,
-    MAX(CASE WHEN idx = CAST(FLOOR(0.75*(n-1)) AS BIGINT) THEN v END) AS hi_lo,
-    MAX(CASE WHEN idx = CAST(CEIL (0.75*(n-1)) AS BIGINT) THEN v END) AS hi_hi,
-    MAX(CASE WHEN idx = CAST(FLOOR(0.50*(n-1)) AS BIGINT) THEN v END) AS md_lo,
-    MAX(CASE WHEN idx = CAST(CEIL (0.50*(n-1)) AS BIGINT) THEN v END) AS md_hi
-  FROM pos
-  GROUP BY sample_datetime
-),
--- 把切点和总差异数挂到每一行（按天）
+-- 把总差异数挂到每一行（按天）
 sorted AS (
   SELECT r.*,
-    CASE WHEN cut.n IS NULL OR cut.n = 0 THEN 0.0
-         ELSE cut.hi_lo + (cut.hi_hi - cut.hi_lo)
-              * (0.75*(cut.n-1) - FLOOR(0.75*(cut.n-1)))
-    END AS p1_cutoff,
-    CASE WHEN cut.n IS NULL OR cut.n = 0 THEN 0.0
-         ELSE cut.md_lo + (cut.md_hi - cut.md_lo)
-              * (0.50*(cut.n-1) - FLOOR(0.50*(cut.n-1)))
-    END AS p2_cutoff,
     SUM(r.ref_diff_cnt) OVER (PARTITION BY r.sample_datetime) AS total_ref_diff
-  FROM raw r LEFT JOIN cut ON cut.sample_datetime = r.sample_datetime
+  FROM raw r
 ),
 calc AS (
   SELECT s.*,
@@ -1013,17 +994,6 @@ ranked AS (
 SELECT
   `Category`,
   `关键Category`,
-  -- determine_priority：逐字对应 label_compare._determine_priority
-  CASE
-    WHEN ref_diff_cnt <= 0 THEN 'P3'
-    WHEN (ref_diff_cnt >= p1_cutoff AND (contrib >= 0.05 OR ref_diff_rate >= 0.30))
-      OR (`关键Category` = '是' AND (ref_diff_cnt >= p1_cutoff OR contrib >= 0.05))
-      THEN 'P1'
-    WHEN ref_cnt < 20 AND `关键Category` = '否' AND contrib < 0.02 THEN 'P3'
-    WHEN ref_diff_cnt >= p2_cutoff OR contrib >= 0.02 OR ref_diff_rate >= 0.15
-      OR `关键Category` = '是' THEN 'P2'
-    ELSE 'P3'
-  END AS `建议优先级`,
   CAST(ref_cnt AS BIGINT)  AS `illion数量`,
   CAST(cand_cnt AS BIGINT) AS `finv数量`,
   CASE WHEN total_n = 0 THEN 0.0
@@ -1075,11 +1045,11 @@ SELECT * FROM model.tmp_eliam_risk_000008_dash_category_stage
 
 
 -- ---------------------------------------------------------------------------
--- STEP D3  dash_flow  差异流向（15 列 + sample_datetime = 16 列）
+-- STEP D3  dash_flow  差异流向（13 列 + sample_datetime = 14 列）
 --   对应 label_compare.compute_difference_flows
 --   **按天**：行 = （sample_datetime, illion×finv×差异类型），按 sample_datetime 分区增量。
---   ⚠️ 依赖 D2（优先级按 (sample_datetime, 展示名) 回查刚重算过的 dash_category），
---      必须紧跟 D2 之后跑。
+--   2026-11-13 起不再输出「排名」与「建议优先级」（原按类别优先级排序），
+--   也不再回查 D2。
 --
 --   注：Python 里 `sql_normalize(rm)` 的 rm 是**展示名**，而「展示名是某个 key 的
 --   clean 众数」，且 normalize(clean) 对这个 key 恒等于 key 本身——所以直接用
@@ -1107,7 +1077,6 @@ g AS (
     SIZE(COLLECT_SET(user_id))        AS users,
     SIZE(COLLECT_SET(application_id)) AS apps,
     SUM(abs_amount)                   AS amt,
-    MIN(row_ord)                      AS first_ord,
     MAX(ref_key)                      AS rk,
     MAX(cand_key)                     AS ck
   FROM diff
@@ -1137,14 +1106,12 @@ dir AS (
   GROUP BY sample_datetime, rm, cm, st
 ),
 joined AS (
-  SELECT g.*, d.s AS dir_s, c.`建议优先级` AS cat_pri, rt.n AS rt_n, rdt.n AS rdt_n,
+  SELECT g.*, d.s AS dir_s, rt.n AS rt_n, rdt.n AS rdt_n,
          CAST(SUM(g.cnt) OVER (PARTITION BY g.sample_datetime) AS BIGINT) AS total_diff
   FROM g
   LEFT JOIN dir d ON d.sample_datetime = g.sample_datetime AND d.rm = g.rm AND d.cm = g.cm AND d.st = g.st
   LEFT JOIN rt  ON rt.sample_datetime  = g.sample_datetime AND rt.rm  = g.rm
   LEFT JOIN rdt ON rdt.sample_datetime = g.sample_datetime AND rdt.rm = g.rm
-  LEFT JOIN model.tmp_eliam_risk_000008_dash_category c
-         ON c.sample_datetime = g.sample_datetime AND c.`Category` = g.rm
 ),
 flagged AS (
   SELECT j.*,
@@ -1166,23 +1133,8 @@ flagged AS (
            OR INSTR(j.ck, 'financial service') > 0))
          THEN '是' ELSE '否' END AS key_flag
   FROM joined j
-),
-final AS (
-  SELECT f.*,
-    CASE
-      WHEN COALESCE(f.cat_pri, 'P3') NOT IN ('P1','P2','P3') THEN 'P3'
-      WHEN f.st = 'candidate_only' AND f.key_flag = '是'
-           AND COALESCE(f.cat_pri, 'P3') = 'P3' THEN 'P2'
-      ELSE COALESCE(f.cat_pri, 'P3')
-    END AS pri
-  FROM flagged f
 )
 SELECT
-  ROW_NUMBER() OVER (
-    PARTITION BY sample_datetime
-    ORDER BY CASE pri WHEN 'P1' THEN 0 WHEN 'P2' THEN 1 WHEN 'P3' THEN 2 ELSE 3 END ASC,
-             cnt DESC, apps DESC, amt DESC NULLS LAST, first_ord ASC) AS `排名`,
-  pri                                          AS `建议优先级`,
   key_flag                                     AS `是否关键Category`,
   rm                                           AS `illion_Category`,
   cm                                           AS `finv_Category`,
@@ -1208,7 +1160,7 @@ SELECT
     ELSE '检查分类边界、关键词/规则优先级及商户知识库'
   END                                          AS `排查建议`,
   sample_datetime
-FROM final
+FROM flagged
 ;
 
 CREATE TABLE IF NOT EXISTS model.tmp_eliam_risk_000008_dash_flow
@@ -1385,11 +1337,11 @@ SELECT * FROM model.tmp_eliam_risk_000008_dash_group_stage
 
 
 -- ---------------------------------------------------------------------------
--- STEP D5  dash_detail  逐笔排查明细（22 列 + sample_datetime = 23 列）
+-- STEP D5  dash_detail  逐笔排查明细（21 列 + sample_datetime = 22 列）
 --   对应 label_compare.build_difference_details
 --   ⚠️ 线上日志没有 account_type / classification_status / engine / rule_id /
---      reason / sample_datetime 这 6 列，所以是 22 列（+ sample_datetime = 23 列）而非
---      原版的 28 列。
+--      reason / sample_datetime 这 6 列，所以是 21 列（+ sample_datetime = 22 列）而非
+--      原版的 28 列。「排查优先级」2026-11-13 起不再输出，P 档由看板自己定。
 --   只出差异行（分类不一致 + 仅 illion 有值 + 仅 finv 有值），双方为空不进。
 --   **按天**：每行带自己的 sample_datetime（= 这笔日志的日期），按 sample_datetime 分区增量、
 --   历史累积，可以按天筛。
@@ -1415,11 +1367,8 @@ enriched AS (
   SELECT
     d.*,
     COALESCE(d.ref_display,  '(空)') AS rd,
-    COALESCE(d.cand_display, '(空)') AS cd,
-    c.`建议优先级`                    AS cat_pri
+    COALESCE(d.cand_display, '(空)') AS cd
   FROM diff d
-  LEFT JOIN model.tmp_eliam_risk_000008_dash_category c
-         ON c.sample_datetime = d.sample_datetime AND c.`Category` = d.ref_display
 ),
 flagged AS (
   SELECT e.*,
@@ -1444,20 +1393,12 @@ flagged AS (
 ),
 final AS (
   SELECT f.*,
-    -- 同 D3：candidate_only + 关键Category + P3 -> 提到 P2
-    CASE
-      WHEN COALESCE(f.cat_pri, 'P3') NOT IN ('P1','P2','P3') THEN 'P3'
-      WHEN f.match_status = 'candidate_only' AND f.key_flag = '是'
-           AND COALESCE(f.cat_pri, 'P3') = 'P3' THEN 'P2'
-      ELSE COALESCE(f.cat_pri, 'P3')
-    END AS pri,
     COALESCE(fn.n, 0) AS flow_cnt
   FROM flagged f
   LEFT JOIN flow_n fn
          ON fn.sample_datetime = f.sample_datetime AND fn.rm = f.ref_matrix AND fn.cm = f.cand_matrix
 )
 SELECT
-  pri                                          AS `排查优先级`,
   CASE match_status
     WHEN 'mismatch'       THEN '分类边界冲突'
     WHEN 'reference_only' THEN 'finv漏识别'
@@ -1478,7 +1419,7 @@ SELECT
     ELSE                       '仅finv有分类' END AS `Category比对状态`,
   sample_datetime
 FROM final
-ORDER BY sample_datetime, pri ASC, flow_cnt DESC, rd ASC, cd ASC,
+ORDER BY sample_datetime, flow_cnt DESC, rd ASC, cd ASC,
          user_id ASC NULLS LAST, transaction_date DESC NULLS LAST, row_ord ASC
 ;
 

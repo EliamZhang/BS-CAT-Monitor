@@ -266,7 +266,7 @@ TILE_METRIC_KEYS = ("illion_coverage", "bscat_coverage", "agreement",
 #               三条连同它们的待办一起删了，这一段落空（引擎与加载路径都还在，
 #               以后要加当期规则，写回配置里那一段即可）。
 #   alerts   —— 带连续天数或历史基准，要看多期历史才判得出来。判出来的是「预警」，
-#               运维事项由预警生成。现在配置里的三条规则全在这一段。
+#               运维事项由预警生成。2026-11-13 用户把预警规则也全部移除了，这一段同样为空。
 # 两段共用同一套判据引擎，也共用同一个待办身份（类别 + 规则 ID）。
 
 # 告警判据能用的指标。名单在这里而不在配置文件里：配置文件给的是「跟谁比、比多少」，
@@ -385,33 +385,8 @@ METRIC_DEFS = [
     ("unknown",         bi("未分类率",       "Unclassified rate"), "unknown_rate",               "down_good"),
 ]
 
-# 每个差异流向内嵌几条样本。当期与历史各期共用同一个配额。
-#
-# 2026-10-13 定的口径。原来按类别的优先级分两档——高的那一档全量内嵌（超 5000 笔降级
-# 到 100 条），其余每流向 5 条预览。两档的代价都随样本量线性涨，而样本量本身在涨：190 万
-# 行的一天，走全量那 17 个类别合 42 万条差异、整页 66 MB；output/ 每天提交回仓库，
-# 90 天留存就是几 GB。缩回「全量」那一档更不可能——历史各期也要留明细，18 期 × 7 MB
-# 就是一百多 MB 的单文件。改成每流向固定条数之后，页面体积与样本量脱钩，历史才留得起。
-#
-# 配额 2026-10-16 从 10 提到 50（用户定「类别逐笔明细增加至 50 条」）。
-# 代价是明说的，以下是**实测**：当期内嵌样本 4,950 → 17,779 条、主页面 18.6 → 54.1 MB。
-# 换来的是一屏能看全一个流向的形态——10 条时中等规模的流向（中位 18 个流向/类、
-# 124 条样本/类）常常几条就没了。
-#
-# **100 MB 是硬顶**：GitHub 拒绝收单个超过 100 MB 的文件（见 .gitignore 里明细 CSV
-# 那条同样的话）。主页面 54 MB、明细历史 52.6 MB 都还有余量，但都只剩不到一倍——
-# 类别数、流向数或这个配额任何一个再涨一倍，推上去就会被拒。到那一步的对策不是抬
-# 这个数，而是把明细搬出单文件页面（分片 / 外链），动之前先看这一段的账。
-#
-# 砍的只是「内嵌多少」，不是「报多少」：树上每一层的笔数与金额照旧是全量真值，页面上
-# 写明「上面是前 N 条预览」+「查看全部 →」指向明细 CSV。真正要读的是按金额排在最前面
-# 的那几条，这个配额给的正是这个序（见 build_category_details）。
-#
-# 原来还有一条 SAMPLES_PER_USER = 3（同一用户在一个流向里最多留几条）：那是抽样时代的
-# 补丁，对付「一个人刷几十条把别人挤掉」。按金额取前 N 条之后它反过来有害——实测
-# 「（未分类）→ Wages」这个流向 40 条样本只覆盖 7 个用户、其中一个人占 28 条，
-# 在抽样里那是取样的偏差，在这个列表里那就是要找的事，再去重等于把线索抹平。
-SAMPLES_PER_FLOW = 50
+# 明细只用来算聚合：类别 → 差异类型 → 差异流向的笔数与金额。页面不再内嵌逐笔
+# 交易示例（2026-11-13 用户定），所以流向上不再挂 samples，页面体积与样本量无关。
 
 
 def log(msg: str) -> None:
@@ -471,16 +446,14 @@ def rows_on(df: pd.DataFrame, d: str, name: str) -> pd.DataFrame:
 
 # detail 表实际用到的列。整表 24 列 / 780 万行，全读进来本机 16 GB 装不下，只能按天
 # 分片过（见 detail_days），列也要挑着读——列越少，峰值内存越低。
-# 剩下的列（排查优先级、是否关键Category、transaction_id / job_id、*_原始、差异流向数量）
-# 没有一处读它们：类别 P 档由板块 + 点名算（见 cat_level），流向数量从明细现算。
-# 2026-10-13 起逐笔表改按取数件英文列展示：读 application_id / bank_account_id
-# （表头 app / ba），不再读 text（那一列退出页面，见 build_category_details）。
+# 剩下的列（是否关键Category、transaction_id / job_id、*_原始、差异流向数量、
+# 逐笔示例用的日期 / 收付 / 对手方 / 申请号 / 账号）没有一处读它们：类别 P 档由板块 +
+# 点名算（见 cat_level），流向数量从明细现算，逐笔示例已不再内嵌。
+# 「排查优先级」2026-11-13 起上游也不再输出（P 档只由本文件这一套定）。
 DETAIL_COLS = ["排查类型", "Category比对状态", "illion_Category", "finv_Category",
-               "差异流向", "amount", "user_id", "application_id", "bank_account_id",
-               "transaction_date", "dr_cr", "third_party", "counterparty",
-               "sample_datetime"]
-# 这几列上游混着写数字和文本（商户号、账号），让 pandas 按列推理会在每个分片上
-# 各推一次，推出两种 dtype 再警告一遍。统一按文本读：页面上它们本来就是原样显示的。
+               "差异流向", "amount", "user_id", "sample_datetime"]
+# 这几列上游混着写数字和文本（类别名、流向标签），让 pandas 按列推理会在每个分片上
+# 各推一次，推出两种 dtype 再警告一遍。统一按文本读。
 DETAIL_TEXT_COLS = [c for c in DETAIL_COLS if c != "amount"]
 DETAIL_CHUNK = 200_000
 
@@ -1875,21 +1848,15 @@ def rules_table() -> list[dict]:
             + [row(r, "alerts") for r in ALERT_RULES])
 
 
-def build_category_details(detail: pd.DataFrame,
-                           preview_n: int = SAMPLES_PER_FLOW) -> dict:
+def build_category_details(detail: pd.DataFrame) -> dict:
     """
-    明细按「类别 → 差异类型 → 差异流向 → 样本交易」四级组织，供问题诊断逐层点开。
+    明细按「类别 → 差异类型 → 差异流向」三级组织，供问题诊断逐层点开。
     页面上漏识别 / 多识别两个类型**不渲染流向这一层**（2026-10-13 用户定）：这两个
     类型的一侧分类恒为 (空)，流向标签只是把类别名抄了一遍，点开等于白点一次——
     树照旧带 flows（数据是完整的），合掉那一层是模板侧的事。
 
-    每个流向内嵌前 preview_n 条样本（按金额降序），当期与历史各期同一个配额。
-    单文件 HTML 没有后端，点开能看到什么完全取决于加载时嵌了什么：
-    每流向固定条数（现在 50）之后，页面体积与当天的样本量脱钩（见 SAMPLES_PER_FLOW）。
-    要看全量，页面上有「查看全部 →」指向明细 CSV。
-
-    截断只动 samples，不动 count / amount / users——树上每一层都是全量真值，
-    「这支流向有 11,252 笔，先给你看 50 条」和「这支流向只有 50 笔」必须分得开。
+    2026-11-13 起不再内嵌逐笔交易示例：每个流向只保留 count / amount / users，
+    页面上看到的是聚合结果，不再放某几笔样本。
 
     类型这一级切在流向之前：同一个流向里可能混着两种差异类型，先把流向合起来、
     再按主导类型归类，类型层的数就和类别层的构成（type_mix）对不上了，
@@ -1898,15 +1865,10 @@ def build_category_details(detail: pd.DataFrame,
     类别归属与 build_categories 用的是同一套规则（illion 侧优先，illion 为空时归
     finv 侧），所以某个类别下各类型、各流向笔数之和恒等于该类的差异笔数——
     点开看到的明细就是上一层那个数字的构成，对不上说明归因逻辑被改坏了。
-
-    金额降序是阅读顺序，不是取样顺序：列表里「一个人刷了几十条」本身就是线索，
-    原来那层按用户去重的补丁随抽样一起退役（见 SAMPLES_PER_FLOW 的注释）。
     """
     bucket, types = bucket_and_type(detail)
     d = detail.copy()
     d["_cat"], d["_type"] = bucket, types
-    d["_abs"] = detail["amount"].abs()
-    d = d.sort_values("_abs", ascending=False)
 
     keys = [k for k, *_ in MISMATCH_TYPES]
     # 源表措辞变了（出现没映射过的排查类型）时，这一笔不并进任何一个已知类型——
@@ -1919,19 +1881,14 @@ def build_category_details(detail: pd.DataFrame,
     cat_users = d.groupby("_cat")["user_id"].nunique().to_dict()
 
     out: dict[str, dict] = {}
-    kept = 0
     for (cat, typ, flow), n in sorted(sizes.items(), key=lambda kv: -kv[1]):
         g = groups.get_group((cat, typ, flow))
         node = out.setdefault(cat, {
             "count": 0, "amount": 0.0, "types": [], "unlabeled": 0,
             "users": int(cat_users.get(cat, 0)),
-            # 这一类每流向的内嵌上限。页面上的「前 N 条预览」与自检的「应嵌多少条」
-            # 都读它，不在两处各推一遍（配额一变，两处就必须同时变，写死任何一处
-            # 都会让它们对不上）。
-            "quota": preview_n,
             "type_mix": {k: 0 for k, *_ in MISMATCH_TYPES},
         })
-        # 类型构成按整组统计，不能只看样本——样本是按金额挑的，会扭曲构成
+        # 类型构成按整组统计
         node["count"] += n
         node["amount"] = round(node["amount"] + float(g["amount"].abs().sum()), 2)
         if typ == UNLABELED_TYPE:
@@ -1944,38 +1901,12 @@ def build_category_details(detail: pd.DataFrame,
                 node["types"].append(tnode)
             tnode["count"] += n
             frm, _, to = flow.partition(" → ")
-            # g 已按金额降序，取前 preview_n 条就是「金额最大的那几笔」
-            sub = g.head(preview_n)
-            kept += len(sub)
             tnode["flows"].append({
                 "from": show(frm),
                 "to": show(to),
                 "count": n,
                 "amount": round(float(g["amount"].abs().sum()), 2),
                 "users": int(g["user_id"].nunique()),
-                # 字段名与页面上那十列一一对应（列序见模板的 SAMP_COLS / sampleRow，
-                # 表头就是取数件的英文列名）：illion 侧 = third_party + illion_Category，
-                # bscat 侧 = counterparty + finv_Category，两侧的 ID 与日期金额照抄源列。
-                #
-                # 两侧类别过一遍 show()：源表把「没给出分类」写成了 "(空)" 这个占位符
-                # （本期 259 万行都是它，正好等于「仅 illion 有分类」的笔数），原样带到
-                # 页面上，我方类别那一列会印出一个叫「(空)」的类别，和真正的类别名混在
-                # 一起排。页面上空分类统一写作「（未分类）」，与 CSV 提示里承诺的一致。
-                # 对手方那两列不这么处理：它们是户名不是分类，空了就在页面上写「—」。
-                # dr 存源表原值（credit / debit）不转「收/支」：表头是英文列名，值改中文
-                # 就又要靠一句对照说明，而这张表是拿去核原始数据的（2026-10-13 用户定）。
-                "samples": [{
-                    "date": str(s["transaction_date"]),
-                    "amount": float(s["amount"]) if pd.notna(s["amount"]) else 0.0,
-                    "dr": str(s["dr_cr"]).strip() if pd.notna(s["dr_cr"]) else "",
-                    "cp": str(s["counterparty"]) if pd.notna(s["counterparty"]) else "",
-                    "fcat": show(s["finv_Category"]),
-                    "tp": str(s["third_party"]) if pd.notna(s["third_party"]) else "",
-                    "icat": show(s["illion_Category"]),
-                    "uid": str(s["user_id"]) if pd.notna(s["user_id"]) else "",
-                    "app": str(s["application_id"]) if pd.notna(s["application_id"]) else "",
-                    "ba": str(s["bank_account_id"]) if pd.notna(s["bank_account_id"]) else "",
-                } for _, s in sub.iterrows()],
             })
 
     for node in out.values():
@@ -1984,9 +1915,6 @@ def build_category_details(detail: pd.DataFrame,
         # 类型顺序 = MISMATCH_TYPES 的固定顺序（红→紫→黄），不按笔数排——
         # 色盲配对的前提就是这个顺序（见 MISMATCH_TYPES 的注释），动了等于换配色方案
         node["types"].sort(key=lambda t: keys.index(t["key"]))
-    if kept:
-        log(f"明细样本: 内嵌 {kept:,} 条 / {len(out)} 个类别"
-            f"（每流向前 {preview_n} 条，完整明细见明细表）")
     return out
 
 
@@ -2199,12 +2127,11 @@ def main() -> int:
     # 日志里已经有一堆正常的读取信息，很难看出失败的原因是配置而不是数据。
     cfg_path = root / "src" / RULES_CONFIG_FILE
     set_rules(*load_rules_config(cfg_path))
-    # 两段规则**可以**有一段是空的，但不能都是空的：snapshot 段 2026-10-16 起就是空的
-    # （用户定「规则只保留趋势的规则，不保留当天的」）。真正要拦的是「配置写坏了/被清空了
-    # 却还照跑」——那样页面上一条判据都没有。跑出 0 条待办是合法的运行结果。
-    if not MONITORING_RULES and not ALERT_RULES:
-        raise SystemExit(f"规则配置里两段规则不能同时为空: {cfg_path}")
+    # 两段都可以是空的：2026-11-13 用户把预警规则也全部移除了，只剩看板本身。
+    # 0 条规则是合法的运行结果，页面照常出，只是不产生待办和预警。
     log(f"规则配置: {len(MONITORING_RULES)} 条快照 + {len(ALERT_RULES)} 条按日 -> {cfg_path}")
+    if not MONITORING_RULES and not ALERT_RULES:
+        log("规则配置为空：本次不生成任何待办或预警")
 
     # 先同步再读数据：线上 5 张 dash 表落到 input/，本次出图用的就是这一批新数据。
     if args.skip_sync:
@@ -2230,8 +2157,8 @@ def main() -> int:
 
     # ── 逐日过一遍明细：算完一天扔一天 ──
     # 明细是四份里唯一大到不能整表进内存的一份（780 万行 / 2.3 GB）。当期那一份
-    # **留到最后**：它的明细树要带着样本内嵌进页面，而建树要等规则跑完（规则决定
-    # 哪些类别在待办里，页面上标不标「判不了/已恢复」）。其余几天只用聚合结果。
+    # **留到最后**：它的明细树要等规则跑完（规则决定哪些类别在待办里，页面上标不标
+    # 「判不了/已恢复」）。其余几天只用聚合结果。
     facts: dict[str, dict] = {}
     detail_now: pd.DataFrame | None = None
     for d, det in detail_days(in_dir / FILES["detail"]):
@@ -2303,8 +2230,7 @@ def main() -> int:
     changes = build_changes(trend_hist, data_date)
     prev_date = (prev_trend_row(trend_hist, data_date) or {}).get("par_dt")
     # 明细由 detail 表现算，不取 flow 表——点开类别要能和类别层的差异笔数对上账，
-    # 两条并行的聚合路径迟早会算出两个数。配额是常数（每流向 SAMPLES_PER_FLOW 条），
-    # 所有类别一视同仁——理由见 SAMPLES_PER_FLOW。
+    # 两条并行的聚合路径迟早会算出两个数。页面上只放聚合后的类型 / 流向，不嵌逐笔示例。
     cat_details = build_category_details(detail_now)
     generated_at = datetime.now().strftime("%Y-%m-%d %H:%M")
 
@@ -2313,14 +2239,6 @@ def main() -> int:
         "dataDate": data_date,
         "total": sample_total,
         "diffTotal": int(summary.get("all_difference_count") or 0),
-        "detailRows": facts[data_date]["rows"],
-        # 内嵌了多少条样本、这一屏是不是最新一期。只有这里知道「页面上看到的是全部
-        # 还是节选」——页脚文案与自检都读这几个键，别在页面里按流向的数量反推。
-        "detailEmbedded": int(sum(len(f["samples"]) for node in cat_details.values()
-                                  for t in node["types"] for f in t["flows"])),
-        "detailScope": "latest",
-        # 页面要写清展示是怎么来的：每个流向只嵌 N 条，而树上印的是全量笔数
-        "samplesPerFlow": SAMPLES_PER_FLOW,
         # 变化检测的两个阈值跟着载荷走：② 的悬停文案要写这两个数，页面里再抄一遍
         # 就会和脚本里的实际判据分家。
         "changeStablePt": CHANGE_STABLE_PP,
@@ -2362,8 +2280,9 @@ def main() -> int:
         # 分类别指标：卡头的读数、迷你图、排序都用它。
         # 顺序沿用 build_categories 的结果（按差异笔数降序），只带页面要的字段。
         # level = P0/P1/P2 类别优先级（唯一定义处见 LEVEL_BY_SEGMENT）：卡头徽标、
-        # 两处目录的点色、排序档都读它。三档状态与「关键类别」2026-10-13 撤掉，
-        # 源表「关键Category」与「建议优先级」两列不再读。
+        # 两处目录的点色、排序档都读它。三档状态与「关键类别」2026-10-13 撤掉；
+        # 源表「建议优先级」「排查优先级」2026-11-13 已从上游删除，P 档只有这一套，
+        # 「关键Category」仍在源表里，但不读。
         # d_* 是与上一期的差：没有上一期（首期）或那一期该字段为空时一律 None，
         # 页面上显示「—」——拿 0 顶替会被读成「没有变化」。表格只印 Δ 不印上期绝对值。
         "categories": [{
@@ -2564,7 +2483,6 @@ def main() -> int:
 
     # 问题诊断要能层层对上账：类别 → 类型 → 流向逐层相加都必须回到该类的差异笔数，
     # 对不上就是「点开看到的是另一个数」，比不显示更糟
-    emb = 0
     for name, node in payload["catDetails"].items():
         c = by_name.get(name)
         if c is None:
@@ -2580,23 +2498,6 @@ def main() -> int:
         if sum(node["type_mix"].values()) != t_sum:
             problems.append(f"{name}: 明细差异构成 {sum(node['type_mix'].values())} "
                             f"!= 明细类型合计 {t_sum}")
-        # 样本条数：每个流向恰好嵌 min(笔数, quota) 条——少于笔数就是「前 N 条预览」，
-        # 够了就是这一支的全貌。上面几条只管逐层相加对不对，没有一条管样本本身——
-        # 「33,954 笔里只嵌了 2,103 笔」这件事原来就是这么漏过去的，所以这条断言是
-        # 这次改动的守门人。quota 由 build_category_details 写进节点，这里只按它重算，
-        # 两处各推一次的话，改了 SAMPLES_PER_FLOW 就会一边嵌一边判，谁都发现不了。
-        q = node.get("quota")
-        if q != SAMPLES_PER_FLOW:
-            problems.append(f"{name}: 节点里的配额 {q} != {SAMPLES_PER_FLOW}")
-        for t in node["types"]:
-            for f in t["flows"]:
-                emb += len(f["samples"])
-                want = min(f["count"], SAMPLES_PER_FLOW)
-                if len(f["samples"]) != want:
-                    problems.append(f"{name} / {t['key']} / {f['from']} → {f['to']}: "
-                                    f"内嵌 {len(f['samples'])} 条 != 应嵌 {want} 条")
-    if emb != payload["detailEmbedded"]:
-        problems.append(f"内嵌样本合计 {emb} != detailEmbedded {payload['detailEmbedded']}")
 
     # 全局一致率 = 标签相同的样本数 ÷ 全量样本数。分母必须是「全量样本」——换成并集
     # 就退化成 ① 那张「一致率」卡，两个指标长得一样，而它们回答的是两个问题。
@@ -2866,15 +2767,14 @@ def main() -> int:
             + (f"（全局 {todo['global']}）" if todo["global"] else "")
             + f"，覆盖 {todo['categories']} 个类别，正差 {npos} / 负差 {nneg}，"
             f"变化 {len(payload['changes'])} 行，"
-            f"明细 {len(cat_details)} 个类别 / 内嵌 {payload['detailEmbedded']:,} 条")
+            f"明细 {len(cat_details)} 个类别")
 
     tpl = tpl_path.read_text(encoding="utf-8")
     html = render(payload, tpl)
 
     out_html = out_dir / f"bscat_monitor_{datetime.now():%Y%m%d_%H%M%S}.html"
     out_html.write_text(html, encoding="utf-8")
-    log(f"生成 {out_html}  ({len(html.encode('utf-8'))/1024/1024:.1f} MB，"
-        f"内嵌明细 {payload['detailEmbedded']:,} 条)")
+    log(f"生成 {out_html}  ({len(html.encode('utf-8'))/1024/1024:.1f} MB)")
     return 0
 
 

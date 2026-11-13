@@ -41,8 +41,8 @@
 
   /* 类别优先级配色。2026-10-13 用户定：P 只针对**类别**，与规则无关——
      P0 = 收入类 + 贷款类两个板块的全体成员，P1 = Rent / Gambling，P2 = 其余
-     （定义与自检都在 monitor.py 的 LEVEL_BY_SEGMENT）。与源表「建议优先级」
-     不是一回事，页面上不展示源表那一套，两套 P 混着读会出事。
+     （定义与自检都在 monitor.py 的 LEVEL_BY_SEGMENT）。上游源表原来的「建议
+     优先级」2026-11-13 已删，页面上的 P 档只有这一套，不存在两套混读。
      两个色相必须拉开：原先 P1 用的橙棕与 P0 红同属暖色段，10.5px 徽标下
      CVD ΔE 仅 1.7、正常视觉 5.3，等于没区分，故 P1 改用青绿；P2 是灰——
      最低一档不与任何色相争，三档徽标都标，灰也看得出「排在最后」。 */
@@ -163,7 +163,7 @@ body {
 }
 /* 主题切换的平滑过渡：只过渡会随主题变的表面/文字/边框色，不动定位与尺寸。
    时长被 prefers-reduced-motion 兜底（见动效段）。 */
-body, .toc, .datebar, .part, .big, .pendlist, .tipbox, .copyfall, button.ghost {
+body, .toc, .datebar, .part, .big, .pendlist, .tipbox, button.ghost {
   transition: background-color .18s ease, color .18s ease, border-color .18s ease, box-shadow .18s ease;
 }
 /* 顶部那 28px 归 .head，不留给 .wrap：吸顶的日期条是 .wrap 的子元素，而 sticky 只在
@@ -389,68 +389,19 @@ select.dsel:hover { border-color: var(--axis); }
 /* 展开时标题栏那一行摘要不再重复（正文里就有）；折叠时才显示 */
 .part[open] .psum { display: none; }
 
-/* 流向行：类别下的第二层 */
-details.flow { border-top: 1px solid var(--grid); }
-details.flow:first-of-type { border-top: 0; }
-details.flow > summary {
-  display: grid; grid-template-columns: 1fr 96px 92px 18px;
-  gap: 12px; align-items: center; cursor: pointer;
-  padding: 10px 8px; list-style: none; user-select: none;
+/* 流向行：类别下的第二层。
+   2026-11-13 起不再内嵌逐笔样本，这一层就是最后一级，行不可点开。 */
+.flowrow {
+  display: grid; grid-template-columns: 1fr 96px 92px;
+  gap: 12px; align-items: center;
+  padding: 10px 8px; border-top: 1px solid var(--grid);
 }
-details.flow > summary::-webkit-details-marker { display: none; }
-details.flow > summary:hover { background: var(--surface-2); border-radius: 7px; }
-details.flow > summary .fname { display: flex; align-items: center; gap: 9px; overflow: hidden; }
-details.flow > summary .fname .sw { width: 10px; height: 10px; border-radius: 3px; flex: none; }
-details.flow > summary .fname .tx { font-size: 12.8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-details.flow > summary .cn { text-align: right; font-size: 12.6px; font-variant-numeric: tabular-nums; color: var(--ink-1); font-weight: 560; }
-details.flow > summary .am { text-align: right; font-size: 12.2px; font-variant-numeric: tabular-nums; color: var(--ink-3); }
-details.flow > summary .ar { color: var(--ink-3); font-size: 11px; transition: transform .15s; }
-details.flow[open] > summary .ar { transform: rotate(90deg); }
-details.flow .body { padding: 2px 8px 14px 20px; }
-details.flow .body table { font-size: 12.2px; }
-details.flow .body .hint { color: var(--ink-3); font-size: 12px; padding: 8px 9px 2px; }
-/* 对手方名照旧用三级墨色：它是「这一笔是谁」，不是判定，读的时候要能一眼跳过。 */
-details.flow .body td .cp { color: var(--ink-3); }
-/* 「预览」标：这一支流向的明细没有全部内嵌，下面那几行只是前几条。
-   标在流向名后面而不是表里，是因为它说的是「这一段有多少被拿掉了」。
-   漏识别 / 多识别的类型行不挂这个标（它那层的表下自会有「还有 N 条未列出」）。 */
-details.flow > summary .fname .pvw {
-  flex: none; font-size: 10.5px; color: var(--ink-3);
-  border: 1px dashed var(--axis); border-radius: 4px; padding: 0 5px;
-}
-/* 「查看全部 →」：页面里放不下的那些，给一条去 CSV 里筛的出路。
-   （2026-10-13 之前这里还有「继续加载 500 行」——内嵌配额改成每处固定的前 N 条之后，
-   一次就铺完了，分页那套随之撤掉。N 现在是 50，见 monitor.py 的 SAMPLES_PER_FLOW。） */
-button.loadmore {
-  background: none; border: 1px solid var(--border); border-radius: 7px;
-  color: var(--ink-2); font: inherit; font-size: 11.8px; padding: 3px 11px; cursor: pointer;
-}
-button.loadmore:hover { color: var(--ink-1); border-color: var(--axis); }
-button.loadmore .lm { color: var(--ink-3); margin-left: 6px; }
-
-/* 复制兜底浮层：file:// 下剪贴板 API 常被拒，退到只读框 + 自动全选，Ctrl+C 拿走。 */
-.copyfall {
-  position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%);
-  z-index: 50; width: min(680px, calc(100vw - 32px));
-  background: var(--surface-1); border: 1px solid var(--axis);
-  border-radius: 10px; padding: 10px 12px 12px;
-  box-shadow: var(--shadow);
-}
-.copyfall .cfhd {
-  display: flex; align-items: center; justify-content: space-between; gap: 10px;
-  font-size: 12.5px; color: var(--ink-2); margin-bottom: 8px;
-}
-.copyfall .cfx {
-  border: 0; background: transparent; color: var(--ink-3); cursor: pointer;
-  font: inherit; font-size: 16px; line-height: 1; padding: 0 2px;
-}
-.copyfall .cfx:hover { color: var(--ink-1); }
-.copyfall textarea {
-  width: 100%; height: 168px; resize: vertical; box-sizing: border-box;
-  font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  color: var(--ink-1); background: var(--surface-2); border: 1px solid var(--grid);
-  border-radius: 7px; padding: 8px 10px;
-}
+.flowrow:first-child { border-top: 0; }
+.flowrow .fname { display: flex; align-items: center; gap: 9px; overflow: hidden; }
+.flowrow .fname .sw { width: 10px; height: 10px; border-radius: 3px; flex: none; }
+.flowrow .fname .tx { font-size: 12.8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.flowrow .cn { text-align: right; font-size: 12.6px; font-variant-numeric: tabular-nums; color: var(--ink-1); font-weight: 560; }
+.flowrow .am { text-align: right; font-size: 12.2px; font-variant-numeric: tabular-nums; color: var(--ink-3); }
 
 table.data { width: 100%; border-collapse: collapse; font-size: 12.8px; }
 table.data th {
@@ -462,35 +413,6 @@ table.data td {
   text-align: right; padding: 7px 9px; border-bottom: 1px solid var(--grid);
   font-variant-numeric: tabular-nums; color: var(--ink-2); vertical-align: top;
 }
-/* 逐笔明细表：10 列对齐取数件（英文列名），比页面上任何一张表都宽。窄屏不压列宽、
-   改横向滚动——把 10 列挤进 400px，每一列都只剩三个字宽，等于读不了。
-   840 这个下限是照**宽屏**那张最窄的容器的：≥1500px 时左目录占地，卡片列只剩
-   ~944，再刨掉卡片内边距和树的缩进，能用的就 856 上下——表要比它宽，右端的
-   对手方 / 类别列就会被切掉，而它们恰好是最该看的两列。 */
-.sampwrap { overflow-x: auto; }
-table.data.samp { min-width: 840px; }
-/* 表头在这张表上允许换行：`table.data th` 那条 nowrap 会让
-   「bscat_counterparty」成为该列的最小宽度，10 列加起来就顶破了容器——所以换行，
-   下划线处有 <wbr> 断点（见 sampHead），长列名自己折两行。 */
-table.data.samp th { white-space: normal; }
-/* 10 列在 856px 里排队，单元格左右各让 2px（9 → 7）：10 列就是 40px，
-   正好够「查看全部」那一行不被换行。 */
-table.data.samp th, table.data.samp td { padding: 6px 7px; }
-/* 10 列里只有金额是读数，其余都是标签（日期、ID、对手方、类别），一律左对齐——
-   整列右对齐会让对手方和类别名看起来像一串数字。 */
-table.data.samp th, table.data.samp td { text-align: left; }
-table.data.samp th.r, table.data.samp td.r { text-align: right; }
-/* 长文本列（两侧交易对手、两侧类别）一律截断 + 悬停看全：
-   不截断的话，一行的宽度由这 10 行里最长的那笔交易决定。 */
-table.data td.ell { max-width: 1px; }
-table.data td.ell span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-table.data td.ell .cp { max-width: none; }
-/* 收/支：这一列是**判定**，不是读数，单独给形态和颜色，扫一眼就能看出这一笔
-   是进账还是出账。值是源表原值 credit / debit（历史旧行里是「收/支」，一并认，
-   见 dcCls）。 */
-table.data td.dc { font-size: 11px; font-weight: 560; }
-table.data td.dc.c { color: var(--agree-ink); }
-table.data td.dc.d { color: var(--st-crit-ink); }
 table.data tbody tr:hover { background: var(--surface-2); }
 .empty { color: var(--ink-3); padding: 34px 0; text-align: center; font-size: 13px; }
 
@@ -654,9 +576,9 @@ button.sbtn:disabled { color: var(--ink-3); border-style: dashed; cursor: not-al
 
 /* ── 类别块底下那两条折叠：预警、明细 ─────────────────────
    ③ 与 ④ 两节 2026-10-12 并进这一层，2026-10-13 又拆成**两条独立的折叠**：
-   预警（风险预警）与明细（逐笔样本）回答的是两个问题，合成一条时点开
+   预警（风险预警）与差异构成回答的是两个问题，合成一条时点开
    必然连另一份一起铺出来——只想看规则的人也要等那棵树渲染完。
-   两条各占一行，默认都收起：明细里最大的单个流向有六万多笔，36 个类别全摊开
+   两条各占一行，默认都收起：差异构成里最大的单个流向有六万多笔，36 个类别全摊开
    谁也读不动；趋势图仍然一个都不折，那一节的规矩不变。 */
 .cmore { border-top: 1px solid var(--grid); }
 .cmore > summary {
@@ -683,8 +605,8 @@ button.sbtn:disabled { color: var(--ink-3); border-style: dashed; cursor: not-al
 .cmore > summary .cmq { color: var(--ink-3); font-size: 11.5px; }
 
 .cmore > .cmbody { padding: 4px 15px 14px; }
-/* 身子里两段的小标题：先「命中的规则」（为什么报），再「问题诊断」（具体哪几笔）。
-   顺序不能反——先看到规则判据，才知道下面那张明细表是按什么挑出来的。 */
+/* 身子里两段的小标题：先「命中的规则」（为什么报），再「问题诊断」（差异落在哪）。
+   顺序不能反——先看到规则判据，才知道下面那棵树是按什么算出来的。 */
 .cmore .cmsec {
   display: flex; align-items: baseline; gap: 8px; margin: 8px 0 7px;
   font-size: 12px; font-weight: 620; color: var(--ink-2);
@@ -704,27 +626,27 @@ button.sbtn:disabled { color: var(--ink-3); border-style: dashed; cursor: not-al
 .cmore .cnote .rid {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11.3px;
 }
-/* 诊断树：类别 → 差异类型 → [分类不一致再分流向] → 样本。层级用「缩进 + 竖线」
-   表达，字号不递减（降字号到底层就读不动了）。漏识别 / 多识别点开类型就是样本表，
-   省掉中间那层流向行（2026-10-13 用户定，见 LEAF_TYPES）。 */
-
-
-details.dtype { border-top: 1px solid var(--grid); }
-details.dtype:first-child { border-top: 0; }
-details.dtype > summary {
+/* 诊断树：类别 → 差异类型 → [分类不一致再分流向]。层级用「缩进 + 竖线」
+   表达，字号不递减（降字号到底层就读不动了）。漏识别 / 多识别没有流向层，
+   直接作为一行显示（见 LEAF_TYPES）；2026-11-13 起不再挂逐笔样本。 */
+details.dtype, .dtype.leaf { border-top: 1px solid var(--grid); }
+details.dtype:first-child, .dtype.leaf:first-child { border-top: 0; }
+details.dtype > summary, .dtype.leaf {
   /* 名称 / 笔数 / 占比 / 金额 / 箭头。金额与流向行的 .am 同宽同款 */
   display: grid; grid-template-columns: 1fr 84px 96px 92px 18px;
-  gap: 12px; align-items: center; cursor: pointer;
-  padding: 10px 8px 10px 4px; list-style: none; user-select: none;
+  gap: 12px; align-items: center;
+  padding: 10px 8px 10px 4px;
 }
+details.dtype > summary { cursor: pointer; list-style: none; user-select: none; }
+.dtype.leaf { grid-template-columns: 1fr 84px 96px 92px; padding-right: 26px; }
 details.dtype > summary::-webkit-details-marker { display: none; }
 details.dtype > summary:hover { background: var(--surface-2); border-radius: 7px; }
-details.dtype > summary .tname { display: flex; align-items: center; gap: 9px; overflow: hidden; }
-details.dtype > summary .tname .sw { width: 10px; height: 10px; border-radius: 3px; flex: none; }
-details.dtype > summary .tname .tx { font-size: 12.8px; font-weight: 560; color: var(--ink-1); }
-details.dtype > summary .cn { text-align: right; font-size: 12.5px; color: var(--ink-1); font-weight: 560; font-variant-numeric: tabular-nums; }
-details.dtype > summary .pc { text-align: right; font-size: 12px; color: var(--ink-3); font-variant-numeric: tabular-nums; }
-details.dtype > summary .am { text-align: right; font-size: 12.2px; color: var(--ink-3); font-variant-numeric: tabular-nums; }
+details.dtype > summary .tname, .dtype.leaf .tname { display: flex; align-items: center; gap: 9px; overflow: hidden; }
+details.dtype > summary .tname .sw, .dtype.leaf .tname .sw { width: 10px; height: 10px; border-radius: 3px; flex: none; }
+details.dtype > summary .tname .tx, .dtype.leaf .tname .tx { font-size: 12.8px; font-weight: 560; color: var(--ink-1); }
+details.dtype > summary .cn, .dtype.leaf .cn { text-align: right; font-size: 12.5px; color: var(--ink-1); font-weight: 560; font-variant-numeric: tabular-nums; }
+details.dtype > summary .pc, .dtype.leaf .pc { text-align: right; font-size: 12px; color: var(--ink-3); font-variant-numeric: tabular-nums; }
+details.dtype > summary .am, .dtype.leaf .am { text-align: right; font-size: 12.2px; color: var(--ink-3); font-variant-numeric: tabular-nums; }
 details.dtype > summary .ar { color: var(--ink-3); font-size: 11px; transition: transform .15s; }
 details.dtype[open] > summary .ar { transform: rotate(90deg); }
 .dtbody { padding: 0 0 8px 22px; border-left: 2px solid var(--grid); margin-left: 4px; }
@@ -745,10 +667,11 @@ details.dtype[open] > summary .ar { transform: rotate(90deg); }
   .tcard .trow { grid-template-columns: 76px 1fr; gap: 8px; }
   .tcard .thd .tx { font-size: 13px; }
   /* 类型行窄屏躲占比、留金额：金额是本轮新加的信息，手机上不该是唯一看不到的那一档 */
-  details.dtype > summary { grid-template-columns: 1fr 76px 76px 18px; }
-  details.dtype > summary .pc { display: none; }
-  details.flow > summary { grid-template-columns: 1fr 76px 18px; }
-  details.flow > summary .am { display: none; }
+  details.dtype > summary, .dtype.leaf { grid-template-columns: 1fr 76px 76px 18px; }
+  .dtype.leaf { grid-template-columns: 1fr 76px 76px; }
+  details.dtype > summary .pc, .dtype.leaf .pc { display: none; }
+  .flowrow { grid-template-columns: 1fr 76px; }
+  .flowrow .am { display: none; }
   /* 图表 SVG 文字随 viewBox 等比缩到 ~4px，这里放大 viewBox 字号兜底；
      左/下边距在 JS 的 trend 分支里同步加宽，两处要一起改。 */
   svg.chart .tick { font-size: 28px; }
@@ -783,9 +706,9 @@ section.part > .phead {
 section.part .pnum { background: var(--ink-1); border-color: var(--ink-1); color: var(--surface-1); }
 
 /* ── 统一的日期条 ─────────────────────────────────────────
-   全页跟时间有关的控件只在这一条里，吸顶钉在标题行下面：读到 ② 某一类底下的某一笔时，
+   全页跟时间有关的控件只在这一条里，吸顶钉在标题行下面：读到 ② 某一类的诊断时，
    还能一眼看见这一屏看的是哪一期。选的这一天是**整页唯一的时间口径**——指标、图表、
-   待办、逐笔明细一起切，走 hash + 重载；折线画的是这一天往前能查到的全部历史。
+   待办一起切，走 hash + 重载；折线画的是这一天往前能查到的全部历史。
    原来它右边还并着一组「趋势范围」（近 14 期 / 近 30 期 / 自 至），只裁折线不换数，
    2026-10-13 撤掉（用户定）：两个日期控件并排，读的人要先分辨哪个换数据、哪个只裁图，
    而答案还得再想一层「那不就等于口径有两套吗」。留下一个，就没有这个问题。
@@ -1052,8 +975,8 @@ svg.mini .empty-note { fill: var(--ink-3); font-size: 11.5px; }
        与「具体是哪几笔」本来是一个问题的上下半句，分在两节里，读的人要
        在两处之间来回对照。合并只改「在哪儿读」，不改判据：预警仍然只由规则产生，
        诊断树仍然逐层点开、每一层的笔数相加等于上一层（漏识别 / 多识别没有流向
-       那一层，点开类型就是样本表）。
-       趋势图那一层仍然一张都不折；折的只是底下这层明细（它最重，按需展开）。 -->
+       那一层，直接作为一行显示；2026-11-13 起不再挂逐笔样本）。
+       趋势图那一层仍然一张都不折；折的只是底下这层差异构成（它最重，按需展开）。 -->
   <section class="part" id="part2">
     <div class="phead">
       <span class="pnum">2</span>
@@ -1102,15 +1025,6 @@ if (LANG === 'en') document.title = 'BSCAT Category Model Performance Monitor';
 
 const DATA = /*__PAYLOAD__*/null/*__ENDPAYLOAD__*/;
 
-/* 每一处（流向行 / 漏识别·多识别的类型行）往页面上嵌几条样本，由脚本写进载荷
-   （当期、历史期、归档页同一个数）。
-   声明在这里而不是挨着明细那一节：sec('head') 的回溯横幅就要用它，而 sec('head')
-   在文件里排在前面、调用即执行——放到明细那一节（后面）会踩 TDZ，回溯那一屏整段
-   横幅直接消失（section 级的 try 把它吞了，只留一句「head 渲染失败」）。
-   老文件（2026-10-13 之前生成的）里没有 samplesPerFlow 这个键，按 0 读：用到它的
-   地方都只是拿它跟 samples.length 比大小，读成 0 顶多少写一句配额说明。 */
-const PER_FLOW = DATA.samplesPerFlow || DATA.previewPerFlow || 0;
-
 /* ── 历史回溯：这一屏看的是哪一天 ──────────────────────────
    脚本把每一天还原成一份日期切片放进 DATA.days（见 monitor.py 的 day_slice），
    这里按 hash 里的日期把那一天**合并到顶层**，下面的代码一行都不用改：所有区块
@@ -1152,8 +1066,8 @@ function dayData(d) {
    老行、纯数据字段、类别名都还是字符串，不必逐处判类型。 */
 const L = (zh, en) => (LANG === 'en' ? en : zh);
 const tx = v => (v && typeof v === 'object') ? (v[LANG] || v.zh) : v;
-/* 「（未分类）」在载荷里是**键**不是文案：明细树的流向 from/to、逐笔样本的
-   fcat/icat 都用它当桶名，改成英文等于把同一个桶写成两个名字。所以值一个字节
+/* 「（未分类）」在载荷里是**键**不是文案：明细树的流向 from/to 都用它当桶名，
+   改成英文等于把同一个桶写成两个名字。所以值一个字节
    都不动（与 monitor.py 的 EMPTY_LABEL 同值），只在**显示的这一刻**换成当前语言，
    与类别名走同一条路。 */
 const EMPTY_CAT = '（未分类）';
@@ -1598,12 +1512,10 @@ sec('head', () => {
      理由见 VIEW_DATE 那段。 */
   const dates = DATA.dates || [DATA.dataDate];
 
-  /* 这一页上有三个「时间」，名字长得像、含义差得远，混起来读是最容易犯的错：
+  /* 这一页上有两个「时间」，名字长得像、含义差得远，混起来读是最容易犯的错：
        监控日期（取样日）  = 取数件的取样日（源表 sample_datetime），一期一个值，
                              是整页的期轴，① ② 的横轴画的也是它；
-       交易日期            = 每笔交易实际发生的那天（源表 transaction_date），
-                             只在 ② 类别块底下的逐笔明细里出现，同一期样本里可以横跨几个月；
-       生成时间            = 这份看板被生成的时刻，跟上面两个都没关系。
+       生成时间            = 这份看板被生成的时刻，跟监控日期没关系。
      这段口径原来挂在这两个控件的悬停上，2026-10-16 删掉了（用户定：悬停里也不放
      解释）。口径本身没变，只活在注释里；规模卡上那个尾字「取样日」是页面上
      仅剩的一点提示。 */
@@ -1629,21 +1541,16 @@ sec('head', () => {
   }
 
   /* 回溯横幅只剩一句说明：正在看哪一期、那一期带着什么。
-     按钮搬进了日期条，这里再说一遍「正在看哪一期」就跟条子上的下拉重复了。
-     2026-10-13 起历史各期也存逐笔样本（每处前 N 条，N 见 monitor.py 的
-     SAMPLES_PER_FLOW），所以这句话要说的是
-     「跟最新那一期一样能点开看」，而不是原来那句「历史里没有逐笔」——那一句现在
-     会把有明细的期说成没明细。真遇到没有样本的历史期（库里旧行、更早的归档文件），
-     折叠条自己那行会如实写「这一期没有存逐笔明细」。 */
+     按钮搬进了日期条，这里再说一遍「正在看哪一期」就跟条子上的下拉重复了。 */
   const notes = [];
   if (HIST_VIEW) {
     notes.push(L(
-      `<div class="histnote"><b>历史回溯</b>：指标、图表、待办与逐笔明细
+      `<div class="histnote"><b>历史回溯</b>：指标、图表与待办
       都切到了 <b>${esc(VIEW_DATE)}</b> 那天算出来的那一份——看到的每个数都是那天
-      算出来、那天存下来的。逐笔明细每处前 ${i(PER_FLOW)} 条（按 |金额| 取）。</div>`,
-      `<div class="histnote"><b>Historical view</b>: metrics, charts, to-dos and sample rows
+      算出来、那天存下来的。</div>`,
+      `<div class="histnote"><b>Historical view</b>: metrics, charts and to-dos
       are all switched to the set computed on <b>${esc(VIEW_DATE)}</b> — every number here was
-      computed and stored that day. Sample rows are the first ${i(PER_FLOW)} per flow (by |amount|).</div>`));
+      computed and stored that day.</div>`));
   }
   if ((DATA.historyNotice || []).length) {
     // 这条不是运营事实，是数据完整性告警：历史比上一份清单少了，多半是目录被清过
@@ -2139,161 +2046,18 @@ const noteInsufficient = r => `<div class="cnote warn">${esc(L('判不了：', '
     `——${esc(tx(r.reason))}。缺的是历史，攒够期数自动开始判；这一条既不算正常也不算异常。`,
     ` — ${esc(tx(r.reason))}. What is missing is history; it starts being judged automatically once enough periods accumulate. This row counts as neither normal nor abnormal.`))}</div>`;
 
-/* ── 每类底下的问题诊断（逐笔明细）────────────────────────
-   原来是 ④ 独立一节：类别 → 差异类型 → 差异流向 → 样本交易，全部 36 个类别都在。
+/* ── 每类底下的问题诊断（差异构成）────────────────────────
+   原来的 ④ 独立一节：类别 → 差异类型 → 差异流向 → 样本交易，全部 36 个类别都在。
+   2026-10-12 并进 ② 每一块底下的折叠（用户定）：这一层回答的是「差异具体落在哪」，
+   而问出这个问题的动作就是「② 里这一类看着不对」——拆成两节，读的人得在两处
+   之间来回对照。
    每一层的笔数相加都严格等于上一层：类型这一级是先切类型、再在类型里切流向，
    不是把流向合起来再按主导类型归类——后者点开看到的是另一个数。
    商户 / 机构 / 规律 / 规则 / 知识库这些层没有数据源，不编。
-
-   2026-10-12 并进 ② 每一块底下的折叠（用户定）：这一层回答的是「具体是哪几笔」，
-   而问出这个问题的动作就是「② 里这一类看着不对」——拆成两节，读的人得在两处
-   之间来回对照。配额那一行也跟着从组标题挪到折叠态上。
-
-   2026-10-13 三处改动：
-     · 明细配额统一成「每处固定的前 N 条」（见 monitor.py 的 SAMPLES_PER_FLOW，
-       2026-10-16 由 10 提到 50）。
-       原来按类别的优先级分两组给两档配额（高优先那组全量内嵌、其余 5 条预览），
-       全量那一档的代价随样本量线性涨，而样本量本身在涨——历史各期也要留明细，
-       一档全量就留不起。页面这边随之丢掉 full 这个字段，改按
-       「嵌的条数 < 这一处的笔数」判断要不要标「预览」。
-     · 逐笔表按原始取数件对齐成 10 列（含我方/对方两侧的对手方与类别）。
-     · 10 列改成取数件的英文列名（表头只留英文，见 SAMP_COLS）；漏识别 / 多识别
-       不再渲染流向层，点开类型就是样本表（见 LEAF_TYPES）；差异类型行补金额列。
+   2026-11-13 用户定：页面不再内嵌逐笔交易示例。流向行只保留笔数 / 金额，
+   类型行仍可展开看流向构成；漏识别 / 多识别没有流向层，直接作为一行显示。
    整棵树包进 try/catch（见 diagTree）：它跟着 ② 一次性铺 36 份，
    一处抛错不能把趋势图、目录、排序一起带走。 */
-const archived = DATA.detailScope === 'archive';
-
-/* 展开才建行。每一处最多 PER_FLOW 条，一次铺完不分页——几十行铺成 DOM 的代价
-   远小于一段分页逻辑带来的「上面这些是不是全部」的疑问（PER_FLOW 现在是 50）。
-   这里按索引挂上样本数组的**引用**，DOM 等到展开那一刻才建。 */
-const SAMPLES = [];
-
-/* 逐笔表的一行。**列序与取数件逐列对应**（2026-10-13 用户定：表头只要英文、
-   只留有来源的列——account_type 取数件里没有，等上游补列再加）。这张表是拿去
-   核对原始数据的，表头写的就是它在 risk_000008_dash_detail.csv 里的列名。
-   表头别名与源列名不同的四处（illion_third_party ↔ third_party 等）原来写在悬停里，
-   2026-10-16 连同所有悬停说明一起删了。
-   长文本列（两侧交易对手）截断 + 悬停看全——不截断的话一行的宽度由最长的那笔
-   交易决定，10 行就撑出屏幕。这一处悬停留着：它显示的是被省略号吃掉的那几个字
-   本身，不是解释（`ell` 的做法同理）。
-   金额精确到分：整页别处的 money() 是压缩写法（$1.2K），核数时被抹掉的正是尾数。 */
-const nf2 = new Intl.NumberFormat(LANG === 'en' ? 'en-US' : 'zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-const ell = (v, title) =>
-  `<td class="ell"><span title="${esc(title || v)}">${esc(v == null || v === '' ? '—' : v)}</span></td>`;
-/* 收/支列的上色：credit（收）用一致率色、debit（支）用告警色。历史旧行里这个字段
-   还存着「收/支」两个中文字（2026-10-13 之前生成的），一并认——颜色不能因为看的
-   是哪一期就反过来。空值不着色。 */
-const dcCls = v => {
-  const t = String(v || '').trim().toLowerCase();
-  return t ? (/^(c|收)/.test(t) ? 'c' : 'd') : '';
-};
-const sampleRow = s => `<tr>
-  <td>${esc(s.app || '—')}</td>
-  <td>${esc(s.uid || '—')}</td>
-  <td>${esc(s.ba || '—')}</td>
-  <td>${esc(s.date)}</td>
-  <td class="r amt">$${nf2.format(s.amount || 0)}</td>
-  <td class="dc ${dcCls(s.dr)}">${esc(s.dr || '—')}</td>
-  ${ell(s.icat ? catTxt(s.icat) : L('（未分类）', '(unclassified)'), s.icat)}
-  <td class="ell"><span class="cp">${esc(s.tp || '—')}</span></td>
-  ${ell(s.fcat ? catTxt(s.fcat) : L('（未分类）', '(unclassified)'), s.fcat)}
-  <td class="ell"><span class="cp">${esc(s.cp || '—')}</span></td>
-</tr>`;
-
-// 剪贴板两条路都失败时的兜底：不弹 alert（alert 里的字选不中），给只读框自动全选。
-function fallbackCopy(text) {
-  const ta = document.createElement('textarea');
-  ta.value = text;
-  ta.style.cssText = 'position:fixed;top:-9999px';
-  document.body.appendChild(ta);
-  ta.select();
-  let ok = false;
-  try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
-  document.body.removeChild(ta);
-  return ok;
-}
-function showCopyFallback(text) {
-  const old = document.getElementById('copyFall');
-  if (old) old.remove();
-  const box = document.createElement('div');
-  box.id = 'copyFall';
-  box.className = 'copyfall';
-  box.innerHTML = `<div class="cfhd">${esc(L('浏览器不允许自动复制，请在下面按 Ctrl+C 手动复制：',
-      'The browser blocked the automatic copy — select the text below and press Ctrl+C:'))}`
-    + `<button type="button" class="cfx" aria-label="${esc(L('关闭', 'Close'))}">×</button></div>`;
-  const ta = document.createElement('textarea');
-  ta.readOnly = true;
-  ta.value = text;
-  box.appendChild(ta);
-  box.querySelector('.cfx').addEventListener('click', () => box.remove());
-  document.body.appendChild(box);
-  ta.focus();
-  ta.select();
-}
-
-// 「查看全部」：明细不在页面里，给的是去 CSV 里筛的路径。必须写清筛哪一列——
-// 这张表没有叫 Category 的列，归属是「illion 侧优先」算出来的，只报一个类别名
-// 等于让人在一张 24 列的宽表里自己猜。
-const csvHint = name => L(`这一类别的明细没有全量内嵌，上面各处只有前 ${PER_FLOW} 条预览。
-完整明细在同目录的 input/risk_000008_dash_detail.csv 里，按这两列之一筛：
-  illion_Category = ${name}
-  finv_Category   = ${name}
-（归属口径：illion_Category 有值就按它算，为空时按 finv_Category 算；
-  CSV 里的空值在页面上写作「（未分类）」。）`,
-  `The full detail for this category is not embedded — each spot above shows only the first ${PER_FLOW} rows.
-The complete detail is in input/risk_000008_dash_detail.csv alongside this file; filter by either column:
-  illion_Category = ${name}
-  finv_Category   = ${name}
-(Attribution: use illion_Category when it has a value, otherwise finv_Category.
- Empty values in the CSV are shown on this page as "(unclassified)".)`);
-
-/* 逐笔表的表头。10 列就是取数件里的列名（2026-10-13 用户定：只要英文名）。
-   这张表是拿去核原始数据的，列名对不上就得靠猜哪列是哪列。
-   表头别名 ↔ 源列名的四处差异（illion_third_party ↔ third_party 等）与每列业务
-   口径原来挂在表头悬停上，2026-10-16 删掉了（用户定：悬停里也不放解释）。
-   数组只剩 [列名, 宽度, 对齐] 三项。 */
-const SAMP_COLS = [
-  ['application_id', '96px', 'l'],
-  ['user_id', '84px', 'l'],
-  ['bank_account_id', '96px', 'l'],
-  ['transaction_date', '92px', 'l'],
-  ['amount', '84px', 'r'],
-  ['dr_cr', '56px', 'l'],
-  ['illion_category', '92px', 'l'],
-  ['illion_third_party', '96px', 'l'],
-  ['bscat_category', '92px', 'l'],
-  ['bscat_counterparty', '96px', 'l'],
-];
-/* 列宽是按「值先够用、列名排第二」定的：值里最长的是日期（2026-08-26）、
-   「（未分类）」和两侧类别名，这几样一旦不够宽，日期折断、类别名被省略号吃掉，
-   读的人会以为数据本身就长这样。列名放不下就折行——但要在**下划线处**折
-   （`_` 后面插一个 <wbr>），不然「bank_account_id」会从中间劈开成
-   「bank_accou / nt_id」，看着像拼错了。 */
-const sampHead = () => '<thead><tr>' + SAMP_COLS.map(([label, w, al]) =>
-  `<th class="${al}"${w ? ` style="width:${w}"` : ''}>`
-  + esc(label).replace(/_/g, '_<wbr>') + '</th>'
-).join('') + '</tr></thead>';
-
-/* 表体（样本表 + 「查看全部」出口，或如实说「没有」）：流向节点与漏识别/多识别的
-   类型节点共用。返回 {idx, body}——idx 挂到 details 的 data-i 上，展开那刻由 fill 取数。
-   拿不到样本时如实说「没有」，而不是给一个永远空的表格。措辞按**这一期是哪种页面**
-   分开：归档快照、历史回溯、当期没有——history 那一路只在真有历史期缺样本时才会
-   走到（2026-10-13 起各期都带样本，但库里的旧行、以及更早生成的归档页文件没有）。*/
-const sampBody = (f, catName) => {
-  const samples = f.samples || [];
-  const idx = SAMPLES.push({ f, catName }) - 1;
-  const body = samples.length
-    ? `<div class="sampwrap"><table class="data samp">${sampHead()}<tbody></tbody></table></div>
-       <div class="fmore"></div>`
-    : `<div class="hint">${archived
-      ? esc(L('归档快照不含逐笔样本（笔数与金额仍在上方）。',
-              'The archived snapshot does not include sample rows (counts and amounts are still above).'))
-      : HIST_VIEW
-        ? esc(L(`回溯到 ${esc(DATA.dataDate)} 的这一期没有存逐笔样本（${esc(DATA.latestDate)} 那一期有）。`,
-                `The period rolled back to (${esc(DATA.dataDate)}) has no stored sample rows (${esc(DATA.latestDate)} does).`))
-        : esc(L('这一处没有逐笔样本。', 'No sample rows here.'))}</div>`;
-  return { idx, body };
-};
 
 /* 漏识别 / 多识别两个类型**不渲染流向这一层**（2026-10-13 用户定）：这两个类型下
    恒为「类别名 → (空)」/「(空) → 类别名」一条流向（monitor.py 的 is_empty 把 (空)
@@ -2301,60 +2065,18 @@ const sampBody = (f, catName) => {
    有几条——按数量合的话，分类不一致哪天只剩一条流向会被悄悄改形状。key 与
    monitor.py 的 MISMATCH_TYPES 对应（同 ENUMS 的规矩，这是第二份拷贝）。 */
 const LEAF_TYPES = { miss: 1, extra: 1 };
-// 合并出的「伪流向」：count / amount / samples 三个字段，形状与真流向一致
-const mergeFlows = flows => ({
-  count: flows.reduce((a, f) => a + f.count, 0),
-  amount: flows.reduce((a, f) => a + f.amount, 0),
-  samples: flows.flatMap(f => f.samples || [])
-    .sort((a, b) => Math.abs(b.amount) - Math.abs(a.amount)),
-});
 
-// 流向 → 样本。层级用缩进和竖线表达，不靠字号递减——字号一降就不可读了
-const flowNode = (f, color, catName) => {
-  const samples = f.samples || [];
-  const { idx, body } = sampBody(f, catName);
-  return `<details class="flow" data-i="${idx}">
-    <summary>
-      <div class="fname">
-        <span class="sw" style="background:${color}"></span>
-        <span class="tx">${esc(catTxt(f.from))} <span style="color:var(--ink-3)">→</span> ${esc(catTxt(f.to))}</span>
-        ${samples.length < f.count ? `<span class="pvw">${esc(L('预览', 'preview'))}</span>` : ''}
-      </div>
-      <div class="cn">${i(f.count)}${esc(L(' 笔', ' rows'))}</div>
-      <div class="am">${money(f.amount)}</div>
-      <div class="ar">▶</div>
-    </summary>
-    <div class="body">${body}</div>
-  </details>`;
-};
+/* 流向行：静态一行，点不开，也没有逐笔样本。层级用缩进和竖线表达，不靠字号递减。 */
+const flowRow = (f, color) => `<div class="flowrow">
+  <div class="fname">
+    <span class="sw" style="background:${color}"></span>
+    <span class="tx">${esc(catTxt(f.from))} <span style="color:var(--ink-3)">→</span> ${esc(catTxt(f.to))}</span>
+  </div>
+  <div class="cn">${i(f.count)}${esc(L(' 笔', ' rows'))}</div>
+  <div class="am">${money(f.amount)}</div>
+</div>`;
 
-/* 展开才建行，一次铺完（每处最多 PER_FLOW 条：分类不一致按流向，漏识别/多识别
-   按类型——见 LEAF_TYPES）。建完标 filled，收起再展开不重建。
-   嵌的条数少于这一处的总笔数时，表下给一条去 CSV 的出口——「前 N 条」与「全部」
-   在页面上的区别必须写出来，只列几行不说明，读的人会以为这里只有这几笔。 */
-function fill(box) {
-  const rec = SAMPLES[+box.dataset.i];
-  const tb = box.querySelector('tbody');
-  const more = box.querySelector('.fmore');
-  if (!tb || !more) return;
-  const ss = rec.f.samples || [];
-  tb.insertAdjacentHTML('beforeend', ss.map(sampleRow).join(''));
-  const left = rec.f.count - ss.length;
-  if (left > 0) {
-    more.innerHTML = `<div class="hint">`
-      + L(`按 |金额| 排序列出 ${i(ss.length)} 条，还有 ${i(left)} 条未列出。`,
-          `Sorted by |amount|: ${i(ss.length)} rows listed, ${i(left)} more not listed.`)
-      + `<button type="button" class="loadmore" style="margin-left:8px">${esc(L('查看全部 →', 'View all →'))}</button></div>`;
-    // 先试自动复制（file:// 下多半被拒），不成再退到浮层里的只读框——两条路都试过，
-    // 点了没动静是最坏的一种结果。
-    more.querySelector('button').addEventListener('click', () => {
-      const text = csvHint(rec.catName);
-      if (!fallbackCopy(text)) showCopyFallback(text);
-    });
-  }
-}
-
-/* 一个类别的诊断树（类别 → 差异类型 → [分类不一致再分流向] → 样本交易）。
+/* 一个类别的诊断树（类别 → 差异类型 → [分类不一致再分流向]）。
    没有差异记录的类别照样给一句「本期没有差异记录」——从页面上悄悄消失，读起来就
    变成「这个类别没问题」，而它其实只是没数据。
    整棵树包在 try 里：它跟着 ② 一次性铺 36 份，一处抛错不能把趋势图、目录、排序
@@ -2372,23 +2094,18 @@ function diagTreeHTML(c) {
   return d.types.map(ty => {
     const tt = typeOf(ty.key);
     const flows = ty.flows || [];
-    const head = `<summary>
+    const cells = `
           <div class="tname"><span class="sw" style="background:${tt.color}"></span>
             <span class="tx">${esc(tx(tt.label))}</span>${ecTag(tt.enum)}</div>
           <div class="cn">${i(ty.count)}${esc(L(' 笔', ' rows'))}</div>
           <div class="pc">${esc(L('占 ', 'share '))}${pct(ty.count / d.count)}</div>
-          <div class="am">${money(flows.reduce((a, f) => a + f.amount, 0))}</div>
-          <div class="ar">▶</div>
-        </summary>`;
-    // 漏识别 / 多识别一脚到底：类型行点开就是样本表（见 LEAF_TYPES），data-i 让 fill 认它
+          <div class="am">${money(flows.reduce((a, f) => a + f.amount, 0))}</div>`;
+    // 漏识别 / 多识别没有流向层，直接作为一行显示；不再有逐笔样本可点开。
     if (LEAF_TYPES[ty.key]) {
-      const { idx, body } = sampBody(mergeFlows(flows), c.name);
-      return `<details class="dtype" data-i="${idx}">${head}
-        <div class="dtbody">${body}</div>
-      </details>`;
+      return `<div class="dtype leaf">${cells}</div>`;
     }
-    return `<details class="dtype">${head}
-        <div class="dtbody">${flows.map(f => flowNode(f, tt.color, c.name)).join('')}</div>
+    return `<details class="dtype"><summary>${cells}<div class="ar">▶</div></summary>
+        <div class="dtbody">${flows.map(f => flowRow(f, tt.color)).join('')}</div>
       </details>`;
   }).join('')
   + (d.unlabeled ? `<div class="hint">${esc(L(
@@ -2398,10 +2115,10 @@ function diagTreeHTML(c) {
 
 /* 类别 → 一个类别块底下那两条折叠。折叠态各占一行，左边那句先说清「里面有什么」：
      风险预警 —— 命中几条规则 / 本期未触发，夹着「判不了 / 已恢复」两枚标记；
-     明细 —— 这一期到底有没有逐笔明细、有的话每处前几条。
+     差异构成 —— 这一期有没有差异、能不能按类型 / 流向拆开。
    扫 36 块时靠这两行的明暗就知道该停在哪几块上。
    默认都收起：36 个类别、每类几千笔差异，摊开谁也读不动。
-   2026-10-13 拆成两条（用户定）——「今天犯了哪几条规则」与「具体是哪几笔」是两个
+   2026-10-13 拆成两条（用户定）——「今天犯了哪几条规则」与「差异落在哪」是两个
    问题，合成一条时点开「只看规则」也会连带把整棵树铺出来。 */
 function moreHtml(c) {
   const name = c.name;
@@ -2409,15 +2126,9 @@ function moreHtml(c) {
   const rec = RECOVERED_BY_NAME.get(name) || [];
   const ins = INSUFF_BY_NAME.get(name) || [];
   const d = (DATA.catDetails || {})[name];
-  /* 明细那一句按**这一期实际带着什么**写，不按页面类型写：归档页、回溯页、
-     当期三种都可能带样本也可能不带（库里旧行、更早生成的归档文件里没有）。
-     写配额而底下是空的，比不写更糟。 */
-  const hasSamp = !!(d && d.types.some(ty => (ty.flows || []).some(f => (f.samples || []).length)));
-  const quota = (!d || !d.count)
+  const hint = (!d || !d.count)
     ? L('本期无差异明细', 'No difference detail this period')
-    : hasSamp ? L(`前 ${PER_FLOW} 条（按 |金额|）`, `first ${PER_FLOW} rows (by |amount|)`)
-    : archived ? L('归档快照不含逐笔明细', 'The archive snapshot carries no row detail')
-    : L('这一期没有存逐笔明细', 'No row detail was stored for this period');
+    : L('按类型 / 流向查看', 'by type / flow');
 
   const facts = rows.length
     ? `<div class="cmsec">${esc(L('命中的规则', 'Rules hit'))}</div>
@@ -2443,8 +2154,8 @@ function moreHtml(c) {
   </details>
   <details class="cmore cwdet" data-cat="${esc(name)}" data-kind="det">
     <summary>
-      <span class="cmt na">${esc(L('逐笔明细', 'Row detail'))}</span>
-      <span class="cmq">${esc(quota)}</span>
+      <span class="cmt na">${esc(L('差异构成', 'Difference breakdown'))}</span>
+      <span class="cmq">${esc(hint)}</span>
       <span class="par">▶</span>
     </summary>
     <div class="cmbody">
@@ -2478,8 +2189,8 @@ function moreHtml(c) {
    不需要任何点击，类别也不会因为没滚动到而缺失。 */
 /* ── 左侧一级目录 ──────────────────────────────────────────
    条目从页面自己的 .part 标题里读，不在这里再抄一份：加一节、改一节标题，目录
-   跟着变，不存在「标题改了目录还是旧的」这种中间态。标题里的括注（「问题诊断
-   （逐笔明细）」）说的是这一节里收着什么东西，目录一栏放不下，去掉括注部分。
+   跟着变，不存在「标题改了目录还是旧的」这种中间态。标题里的括注说的是这一节
+   收着什么东西，目录一栏放不下，去掉括注部分。
 
    2026-10-13 到 10-16 之间 ② 底下还挂着第二层：逐个类别。2026-10-16 用户定
    撤掉——一级目录只回答「这一页有哪几节」，类别归 ② 正文里那列「类别目录」管
@@ -2669,19 +2380,6 @@ sec('catTrends', () => {
   // 正文：一类一块，一条清单铺到底，次序由排序档定（见 applySort）
   el('catBlocks').innerHTML = rows.map((c, n) => blkHtml(c, n)).join('');
 
-  /* 展开某个流向（或漏识别/多识别的类型行）才建样本行。认 data-i：全页带它的只有
-     这两处——分类不一致的类型行不带，天然被绕过（它的样本在流向那一层）。
-     toggle 不冒泡，委托只能挂在捕获阶段；而且**只挂这一次**——在渲染循环里反复
-     addEventListener 会让一次展开触发 N 次填充（图表的十字准星吃过这个亏）。
-     挂在 #catBlocks 上而不是每一棵树上：排序搬的是节点，监听不跟着走。 */
-  el('catBlocks').addEventListener('toggle', ev => {
-    const d = ev.target;
-    if (!d.open || d.dataset.i == null) return;
-    if (d.dataset.filled) return;
-    d.dataset.filled = '1';
-    fill(d);
-  }, true);
-
   // 目录：36 条对 36 块（data-blk 直接指向块的 id），一条清单，P 档靠色点给
   const navItem = n => {
     const c = rows[n], lvl = c.level;
@@ -2828,8 +2526,7 @@ sec('catTrends', () => {
     + (nRec ? L(` · 已恢复 <b>${nRec}</b>`, ` · <b>${nRec}</b> recovered`) : '')
     + (nIns ? L(` · 判不了 <b>${nIns}</b> 条规则`,
         ` · <b>${nIns}</b> rule${nIns > 1 ? 's' : ''} undecidable`) : '');
-  // 明细配额、恒等式、路径这些总说明原先挂在 ④ 那一行摘要的悬停上，现在页面上只留在
-  // 每个类别块底下的两条折叠里（各自展开后写明筛哪一列、筛什么值）。
+  // 差异构成的口径说明留在每个类别块底下的折叠里（展开后按类型 / 流向逐层看）。
 });
 
 /* ── 通用表格视图 ─────────────────────────────────────── */
@@ -2889,8 +2586,7 @@ sec('theme', () => {
      重载前把 hash 里的 lang= 抹掉：那是一次性强制覆盖，留着会让这次点击看着没生效。
      hash 里其余部分（#date=）一个字都不动，所以切完语言还停在同一期。
      **不给它挂 title**：这颗按钮不解释任何东西（点了就换成那个语言），而 2026-10-16
-     用户定的是悬停里不放解释——页面上现在一个非空 title 都没有（逐笔表里那几个是
-     截断补偿，显示的是被省略号吃掉的字本身）。 */
+     用户定的是悬停里不放解释——页面上现在一个非空 title 都没有。 */
   const lb = el('langBtn');
   lb.textContent = L('English', '中文');
   lb.addEventListener('click', () => {
