@@ -39,7 +39,7 @@
 --       1. 窗口里某天这次没有任何成功记录 -> 该天旧分区不会被清空（写入集合
 --          里没有它）。要清就手动 ALTER TABLE ... DROP PARTITION 后重跑。
 --       2. **sample_datetime** 是产出表的最后一列（分区列），取日志 inserttime 前 10 位。
---          本版本按 inserttime 昨日窗口读取，因此正常情况下写入昨日 sample_datetime 分区。
+--          本版本按 inserttime 最近 7 天窗口读取，因此正常情况下写入最近 7 天的 sample_datetime 分区。
 --       3. 看板脚本从 log_run 的 sample_datetime 集合识别本批需要刷新的分区。
 --
 --  ⚠️⚠️ **依赖一次性迁移**：旧版产出表是无分区的，结构与本版不同。第一次切
@@ -94,7 +94,8 @@ SET hive.exec.dynamic.partition.mode = nonstrict;
 -- ---------------------------------------------------------------------------
 -- STEP 0  源表视图：每日按 inserttime 增量读取
 --
--- 每日调度时自动读取「昨天 00:00（含）至今天 00:00（不含）」入库的日志。
+-- 每次调度读取「最近 7 天 00:00（含）至今天 00:00（不含）」入库的日志。
+-- 滚动窗口：每天重算最近 7 天，某天缺数会在之后 7 天内自愈；与 sync.sql 的 7 天窗口对齐。
 -- sample_datetime 仍取 inserttime 前 10 位，因此本次读取的数据按入库日期写入对应分区。
 -- 注意：如果源表按 par_dt 分区，而查询没有 par_dt 条件，可能会扫描大量源表分区；
 --       若要做分区裁剪，需确认 par_dt 与 inserttime 的关系，再增加安全的 par_dt 范围。
@@ -105,7 +106,8 @@ SELECT * FROM ods.aus_cbd_gidp_core_gidp_strategy_run_log
 WHERE strategy_code = 'RISK_000008'          -- 包装分类模型的策略编码
   AND run_status    = 1                      -- 1=成功（error_code=0000），2=失败（error_code=2002）
   AND isactive      = 1                      -- 过滤逻辑删除
-  AND inserttime >= concat(date_format(date_sub(current_date(), 1), 'yyyy-MM-dd'), ' 00:00:00')
+  -- 滚动 7 天窗口：每次重算最近 7 天，分区幂等覆盖；与 sync.sql 的窗口一致
+  AND inserttime >= concat(date_format(date_sub(current_date(), 7), 'yyyy-MM-dd'), ' 00:00:00')
   AND inserttime <  concat(date_format(current_date(), 'yyyy-MM-dd'), ' 00:00:00')
 ;
 -- 若同一策略下有多个模型/多个 release 混跑，再补 release_id（本批为 118）。
@@ -119,7 +121,7 @@ WHERE strategy_code = 'RISK_000008'          -- 包装分类模型的策略编�
 -- 备选方案（只在「手上只有导出的 CSV、连不上 ODS 表」时才用）挪到了
 -- 同目录的 11_optional_csv_path.sql。
 --
--- 本文件按当前日期自动读取昨日 inserttime 窗口，无需每天手动修改日期。
+-- 本文件按当前日期自动读取最近 7 天的 inserttime 窗口，无需每天手动修改日期。
 -- ─────────────────────────────────────────────────────────────────────────
 
 
@@ -138,7 +140,7 @@ WHERE strategy_code = 'RISK_000008'          -- 包装分类模型的策略编�
 -- 注意 run_status 在两条源通路里类型不同（ODS 表是 INT，CSV 外部表是 STRING），
 -- 所以统一 CAST 成字符串再比，这样同一份 SQL 两边都能跑。
 --
--- 本批窗口 = STEP 0 中 inserttime 的昨日时间范围：log_run / log_out 每次重建，只装本批新增日志。
+-- 本批窗口 = STEP 0 中 inserttime 的最近 7 天范围：log_run / log_out 每次重建，只装本批日志。
 -- ⚠️ log_run 别删——看板脚本靠它的 sample_datetime 集合识别「本批要刷新哪些分区」。
 -- ---------------------------------------------------------------------------
 
