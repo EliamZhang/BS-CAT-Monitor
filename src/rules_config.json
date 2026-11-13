@@ -1,0 +1,160 @@
+{
+  "$doc": {
+    "用途": "BSCAT 看板全部监控规则的唯一一份定义。monitor.py 只从这里读阈值，页脚的规则表、卡片上的 Trigger 文案、预警的判定也全部由这一份渲染，所以改口径 = 改这里，改完重跑一次即生效。",
+    "为什么单独一个文件": "阈值原来写死在 monitor.py 的 MONITORING_RULES 里，改一个数要动代码、走一次代码评审。判定逻辑（怎么比、连续几天、跟什么基准比）留在代码里，阈值和规则的开关搬到这里。",
+    "版本": "version 只做形态校验。加字段时不必改它；改了已有字段的含义才需要往上抬，方便日后回溯「这一期数据是用哪一版口径跑的」。",
+    "snapshot": "当期快照规则：只看监控日当天的数。**2026-10-16 起这一段是空的**——用户定「规则只保留趋势的规则，不保留当天的」，RULE_001（覆盖率差与一致率双越线）、RULE_002（差异率过高）、RULE_003（未分类比例过高，早已停用）三条连同它们产生的待办一起删掉了。空数组是合法的（脚本起跑前只拦「两段同时为空」，见 monitor.py 主流程里 set_rules 那两句；一段为空而另一段有规则照常跑），留着这个键是为了让 schema 完整：以后要加当期规则，写回这里即可。删规则这件事对 output/todo_status.csv 是有影响的——那三条历来产生的行会被当成「规则已删」清掉，正是这次想要的。",
+    "alerts": "按日规则：带连续天数（window）或历史基准（baseline），要看多期历史才判得出来。scope 可以是 category 或 global；全局规则必须写 tile，命中后角标挂在 ① 那张指标卡上。",
+    "字段说明": {
+      "id": "规则 ID。前缀区分两类：RULE_* = 当期快照（2026-10-16 起这段是空的，见上面 snapshot 那条，所以现在配置里的 ID 全是 ALERT_*），ALERT_* = 按日趋势。同一条规则在 output/todo_status.csv 里按 类别+规则ID 认人，改了 ID 等于换了一条规则，历史状态会重新开始。",
+      "enabled": "false = 关掉这条规则。关掉后它不再产生任何预警和运维事项，但规则本身仍出现在页脚规则表里（标明已停用），免得不声不响少了一条判据。",
+      "scope": "category = 逐类别判，命中的类别各自出现在 ② 里；global = 整个模型一起判（不分类别，挂在「全体类别」下）。全局**按日**规则命中的条目显示在 ① 对应指标卡的角标上（由 tile 指定是哪张卡），不进 ② 的类别块——2026-10-14 删掉了那张按影响排序的类别下钻表，2026-10-16 试过给全局命中挂回一块、一天就撤了；2026-10-20 起改成指标卡角标，既不新增区块，又让命中在读数旁边看得见。加载时要求 enabled 的全局规则必须写 tile 且是 ① 六张卡之一——命中了却看不见的待办比不报还糟。snapshot 段仍只支持 category，全局规则只允许出现在 alerts 段。",
+      "tile": "仅 scope=global 的按日规则使用：命中后角标挂在哪张 ① 指标卡上。取值必须是 bscat_coverage / illion_coverage / agreement / global_agreement / miss / extra 之一，与模板 TILES 那张列表同一组键。类别规则不写这个键。",
+      "title": "规则名，页面上到处显示的就是它。",
+      "window": "连续天数：判定条件必须连续成立这么多天才算触发。1 = 只看当天。历史期数不够 window 天时判为「数据不足」，既不算正常也不算异常。",
+      "condition": "给人看的判据文案。{名字} 占位符必须与 trigger 里每个判据的 as（或 metric）严格同名，值从阈值来——写的和判的是同一组数字，自检盯着这件事。规则级的 window 也可作为 {window} 引用。",
+      "trigger": "判定条件。all = 每条判据都要成立；any = 任一条成立即可（用于「超过绝对阈值 或 超过历史基准」这种二选一）。",
+      "trigger.metric": "判据用的指标，取值必须在 monitor.py 的 ALERT_METRICS 名单里。",
+      "trigger.op": "比较方式：gt / gte / lt / lte = 与 threshold 比；gt_baseline / gte_baseline = 与历史基准比（ratio 倍）。",
+      "trigger.threshold": "绝对阈值。单位跟着指标走：rate 类是 0-1 的比率（0.8 就是 80%），pt 类是百分点（1.0 就是 1 pt）。",
+      "trigger.ratio": "相对历史基准的倍数，1.5 = 超过基准的 1.5 倍才算异常。",
+      "trigger.window": "基准窗口：往前看多少天算基准（不含当天）。",
+      "trigger.min_days": "基准至少要几天才算得出来。不够就判「数据不足」，不触发不可靠的预警。",
+      "trigger.as": "这条判据在 condition 里的占位符名字，默认与 metric 同名。两种情况下要写它：同一条规则里两个判据用同一个指标；以及别条规则已经用了这个指标、阈值却不一样（打平的那份阈值字典按名字存，同名会互相覆盖——ALERT_003 的 diff_rate_ratio 就是后一种）。",
+      "context": "除了判据指标，预警卡片还要一并显示的指标（如覆盖率差要同时看到两侧的覆盖率）。",
+      "metrics": "这条规则负责 ① 的哪几行变化指标（可选值见 monitor.py 的 METRIC_DEFS）。变了多少由它派生方向与「是不是真的走坏」。",
+      "issueType": "问题类型，取值见页脚「固定选项」。",
+      "recommendedAction": "规则给出的处理方向，运维事项卡片上的「建议动作」。",
+      "suppressedBy": "命中过这些规则的类别，本条不再报。防的是同一个问题被说两遍。",
+      "actionHint": "运维事项上的排查建议。不同规则对应不同的排查方向，页面上按规则显示。",
+      "en": "英文那一半（title / condition / actionHint 三个键）。**必填**：缺 en 块、或 en 少一个键，加载配置时直接报错退出（2026-10-16 用户定「漏译直接报错中止」）——配置是手改的、进版本库的，漏译就是配置写坏了，放过去的症状是英文页面上静默冒出一句中文。en.condition 的占位符必须与中文那份**逐字相同**：两份文案引用的得是同一组阈值，各写各的话，中文页写 60%、英文页写 0.6，而自检只盯中文那一份，错的那一半没有任何地方会喊。"
+    },
+    "默认值怎么定的": "全部取「本期一跑就明显不正常」的量级，宁松不滥：ALERT_001 的一致率红线定在 60%、ALERT_002 的覆盖率差定在 −1 pt，都低于整体水平（本期整体一致率 ÷ 并集约 72%），不会把「本来就偏低」的一半类别全报上来；连续 3 天是为了滤掉单期波动。ALERT_003 按差异率相对**本类自己的**历史中位数抬升判：倍数 1.3、基准看前 7 天、至少 3 天才成立（1.5 倍在手上 18 期里只命中 6 个「类-日」、当期 0 次，等于这条规则放假；1.3 倍是当期 3 类、18 期共 24 个「类-日」覆盖 13 个类）。这些都是**初始值**，攒够历史后应当按实际波动重新定——改这里重跑一次即可生效。2026-10-20 加的两条整体规则：ALERT_004 的 80% 是地板（18 期实测 bscat 覆盖率 84.01%–89.67%，没有一期触发）；ALERT_005 的 80% 高于现有水平（18 期并集一致率 66.98%–77.23%，当期 71.69%），按用户要求保留 80%，首跑就会带着连续 18 天成立，属于常驻状态而不是突发预警。",
+    "只看比率，不看笔数": "2026-10-16 用户定：预警判据一律用比率 / 百分点，不设笔数阈值。理由是笔数不可跨类比较——并集 1,000 的类和 70 万的类，同一个 5,000 笔门槛对前者是灾难、对后者是日常。旧 ALERT_003 那两条（差异笔数 > 5,000 或 > 中位数 ×1.5）在 18 期里命中 280 个「类-日」、除首期外每天报 15-20 个类，报出来的其实是类别大小；已删的 RULE_002 当年那条「差异笔数 ≥ 200」下限同理（该下限在 18 期里只挡下过 1 次：2026-09-21 的 Debt Consolidation，那天并集只有 41 行、是首期样本还没铺开的时候）。要看「哪几类量大」用 ② 的排序档（按差异笔数排），规则只管判异常。",
+    "整体指标怎么下钻到类别": "整体一致率、两侧覆盖率偏低时「该看哪几类」，不在规则里答，而在 ② 的排序档里答：一致率缺口看「一致率缺口最大」（= 差异笔数降序，各类差异笔数是整体缺口的精确划分），覆盖率看「覆盖差 · bscat 低 / 高」两档（各类覆盖率差的分母都是全量样本，所以按差值排 = 按对整体差值的贡献排）。规则里**不写**类别名：写死了下个月就过期。2026-10-14 之前走的是另一条路——全局规则命中后展开一张下钻表，那张表和当时的 RULE_004-006 一起删了：页面上多出一整块，而排序档本来就在那儿，两个地方回答同一个问题。",
+    "排序档": "② 的排序档一共八档，回答三个不同的问题，别互相替代。① 「按 P0/P1/P2」是默认档：P 档由服务端定（LEVEL_BY_SEGMENT），同档内按差异笔数降序，回答「今天先看哪几类」。② 「一致率缺口最大 / 漏判最多 / 多判最多」三档回答「整体的那几个数为什么低」——把整体缺口摊到各类，每类的份额就是该类的差异 / 漏判 / 多判笔数（分母对每一类都是同一个整体分母），所以按笔数排就是按影响排。③ 「覆盖差 · bscat 低 / 高」两档回答「哪几类把整体覆盖率差拉成负的、哪几类拉成正的」：**方向固定、一档一个方向**，排的是 (bscat 判出 − illion 判出) ÷ 全量样本。为什么必须有这两档、不能拿「漏判最多 / 多判最多」代替：那两档排的是「一侧有、另一侧没有」的两笔粗量，覆盖差是两者的**净差**——2026-10-08 那期实测，「漏判最多」前十与覆盖差最低前十只重合 4 个、「多判最多」只重合 2 个；All Other Credits 就是反例：漏判 20,420 笔排第 2、多判 16,757 笔排第 1，净差却是 +0.096 pt（bscat 反而更多）。规则里不写类别名（写死了下个月就过期），页面上的按钮文案就是这两档的名字。"
+  },
+
+  "version": 1,
+
+  "snapshot": [],
+
+  "alerts": [
+    {
+      "id": "ALERT_001",
+      "enabled": true,
+      "scope": "category",
+      "title": "一致率持续偏低",
+      "en": {
+        "title": "Agreement rate persistently low",
+        "condition": "Agreement rate < {iou_rate:.0%} for ≥ {window} consecutive days",
+        "actionHint": "A single low day can be chance in that period's sample; several days in a row means the rule itself does not line up. Compare the difference flows of the last few periods and find the branch that keeps coming back."
+      },
+      "window": 3,
+      "condition": "一致率 < {iou_rate:.0%} 连续 ≥ {window} 天",
+      "trigger": {
+        "all": [
+          {"metric": "iou_rate", "op": "lt", "threshold": 0.6}
+        ]
+      },
+      "context": ["finv_coverage", "illion_coverage"],
+      "metrics": ["agreement"],
+      "issueType": "Category Definition",
+      "recommendedAction": "Review Category Definition",
+      "actionHint": "一天偏低可能是当期样本的偶然，连着多天就说明规则本身对不上：拿最近几期的差异流向做对照，找出反复出现的那一支。"
+    },
+    {
+      "id": "ALERT_002",
+      "enabled": true,
+      "scope": "category",
+      "title": "bscat 覆盖率持续低于 illion",
+      "en": {
+        "title": "BSCAT coverage persistently below Illion",
+        "condition": "BSCAT coverage − Illion coverage < {coverage_gap:.1f} pt for ≥ {window} consecutive days",
+        "actionHint": "BSCAT keeps classifying fewer rows into this category than Illion: look for transactions Illion classifies and BSCAT leaves empty (the \"BSCAT missed\" flow) and identify which rule or merchant is missing."
+      },
+      "window": 3,
+      "condition": "bscat 覆盖率 − illion 覆盖率 < {coverage_gap:.1f} pt 连续 ≥ {window} 天",
+      "trigger": {
+        "all": [
+          {"metric": "coverage_gap", "op": "lt", "threshold": -1.0}
+        ]
+      },
+      "context": ["finv_coverage", "illion_coverage"],
+      "metrics": ["bscat_coverage"],
+      "issueType": "Missing Rule",
+      "recommendedAction": "Review Missing Rule",
+      "actionHint": "bscat 判出这一类别的笔数持续比 illion 少：去这一类里找 illion 有、bscat 判空的交易（差异流向里的「bscat 漏识别」），确认缺的是哪条规则或哪个商户。"
+    },
+    {
+      "id": "ALERT_003",
+      "enabled": true,
+      "scope": "category",
+      "title": "差异率异常抬升",
+      "en": {
+        "title": "Difference rate abnormally high",
+        "condition": "Difference rate > historical median × {diff_rate_ratio:g}",
+        "actionHint": "This category's difference rate is well above its own usual level: first check whether the difference flows contain one newly concentrated branch, then whether the union shrank at the same time — a smaller denominator pushes the same difference count to a higher rate."
+      },
+      "window": 1,
+      "condition": "差异率 > 历史中位数 × {diff_rate_ratio:g}",
+      "trigger": {
+        "all": [
+          {"metric": "diff_rate", "op": "gt_baseline", "ratio": 1.3, "window": 7, "min_days": 3, "as": "diff_rate_ratio"}
+        ]
+      },
+      "metrics": ["difference"],
+      "issueType": "Merchant Mapping",
+      "recommendedAction": "Review Merchant Mapping",
+      "actionHint": "这一类的差异率比它自己的平时高一截：先看差异流向里是不是多出一支集中的流向，再看并集是不是同时变小了——分母小了，同样的差异笔数会把率顶起来。"
+    },
+    {
+      "id": "ALERT_004",
+      "enabled": true,
+      "scope": "global",
+      "tile": "bscat_coverage",
+      "title": "整体 bscat 覆盖率持续偏低",
+      "en": {
+        "title": "Overall BSCAT coverage persistently low",
+        "condition": "Overall BSCAT coverage < {overall_bscat_coverage:.0%} for ≥ {window} consecutive days",
+        "actionHint": "Overall BSCAT coverage is BSCAT-classified rows ÷ all sample rows. Below 80%, use the \"Coverage gap · bscat low\" sort in ② to find the categories contributing most to the overall gap, then open their \"BSCAT missed\" rows."
+      },
+      "window": 3,
+      "condition": "整体 bscat 覆盖率 < {overall_bscat_coverage:.0%} 连续 ≥ {window} 天",
+      "trigger": {
+        "all": [
+          {"metric": "overall_bscat_coverage", "op": "lt", "threshold": 0.8}
+        ]
+      },
+      "context": ["overall_illion_coverage"],
+      "metrics": ["bscat_coverage"],
+      "issueType": "Missing Rule",
+      "recommendedAction": "Review Missing Rule",
+      "actionHint": "整体 bscat 覆盖率 = bscat 判出分类的笔数 ÷ 全量样本。低于 80% 时，在 ② 用「覆盖差 · bscat 低」排序档找对整体差距贡献最大的类别，再进该类别的「bscat 漏识别」明细。"
+    },
+    {
+      "id": "ALERT_005",
+      "enabled": true,
+      "scope": "global",
+      "tile": "agreement",
+      "title": "整体一致率持续偏低",
+      "en": {
+        "title": "Overall agreement persistently low",
+        "condition": "Overall agreement (union) < {overall_iou_rate:.0%} for ≥ {window} consecutive days",
+        "actionHint": "Overall agreement is matching labels ÷ union. Below 80%, use the \"Largest agreement gap\" sort in ② to find the categories with the most differences, then open their difference detail."
+      },
+      "window": 3,
+      "condition": "整体一致率（并集口径）< {overall_iou_rate:.0%} 连续 ≥ {window} 天",
+      "trigger": {
+        "all": [
+          {"metric": "overall_iou_rate", "op": "lt", "threshold": 0.8}
+        ]
+      },
+      "context": [],
+      "metrics": ["agreement"],
+      "issueType": "Category Definition",
+      "recommendedAction": "Review Category Definition",
+      "actionHint": "整体一致率 = 两侧标签相同 ÷ 并集。低于 80% 时，在 ② 用「一致率缺口最大」排序档找差异笔数最多的类别，再进该类别的差异明细。"
+    }
+  ]
+}
