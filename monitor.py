@@ -3,10 +3,11 @@
 """
 BSCAT 分类模型效果监控
 
-启动时先执行 src/sync.py 到线上取数：5 张 dash 表写入 input/；
-随后聚合出监控指标，渲染成单文件 HTML 看板，文件名为
-output/bscat_monitor_<运行时间戳>.html；最后把 input/ 下的 CSV 与这个
-HTML 一起打包成 bscat_monitor_<同一时间戳>.zip，放在项目根目录。
+启动时先执行 src/sync.py 到线上取数：5 张 dash 表（出图用）和收入/负债流
+汇总（仅归档）写入 input/；随后聚合出监控指标，渲染成单文件 HTML 看板，文件名为
+output/bscat_monitor_<运行时间戳>.html；再按监控结果圈出问题类别的 top application，
+导出它们当天的全部逐笔（给 BS-CAT-Evolve 做规则迭代）；最后把 input/ 下的 CSV
+（含圈选清单）与这个 HTML 一起打包成 bscat_monitor_<同一时间戳>.zip，放在项目根目录。
 
 用法:
     python monitor.py
@@ -29,7 +30,7 @@ import pandas as pd
 
 # 同步、模板、规则配置都在 src/ 下，和 monitor.py 分开放
 sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
-from sync import sync_all
+from sync import export_evolve_transactions, sync_all
 
 # Windows 控制台默认 GBK 编码，日志里出现一个 ⚠ 或 ✗，print 就抛 UnicodeEncodeError。
 # 糟的是这类字符恰好都在「出事了要喊一声」的路径上——提醒自己把自己干掉，
@@ -449,15 +450,27 @@ def rows_on(df: pd.DataFrame, d: str, name: str) -> pd.DataFrame:
 # detail 表实际用到的列。整表 24 列 / 780 万行，全读进来本机 16 GB 装不下，只能按天
 # 分片过（见 detail_days），列也要挑着读——列越少，峰值内存越低。
 # 剩下的列（是否关键Category、transaction_id / job_id、*_原始、差异流向数量、
-# 逐笔示例用的日期 / 收付 / 对手方 / 申请号 / 账号）没有一处读它们：类别 P 档由板块 +
+# 逐笔示例用的日期 / 收付 / 对手方、账号）没有一处读它们：类别 P 档由板块 +
 # 点名算（见 cat_level），流向数量从明细现算，逐笔示例已不再内嵌。
 # 「排查优先级」2026-11-13 起上游也不再输出（P 档只由本文件这一套定）。
+# application_id 只给 Evolve 圈选（见 evolve_selection），不参与任何聚合。
 DETAIL_COLS = ["排查类型", "Category比对状态", "illion_Category", "finv_Category",
-               "差异流向", "amount", "user_id", "sample_datetime"]
+               "差异流向", "amount", "user_id", "application_id", "sample_datetime"]
 # 这几列上游混着写数字和文本（类别名、流向标签），让 pandas 按列推理会在每个分片上
 # 各推一次，推出两种 dtype 再警告一遍。统一按文本读。
 DETAIL_TEXT_COLS = [c for c in DETAIL_COLS if c != "amount"]
 DETAIL_CHUNK = 200_000
+
+# ── Evolve 圈选（随每日 zip 交给 BS-CAT-Evolve）────────────────────────────
+# 问题类别 = 差异率高于整体差异率的类别（并集低于 EVOLVE_MIN_UNION 的小类别
+# 剔除，避免一两笔就 100% 的噪声），再按差异笔数取前 N 类；每类取差异笔数最多的
+# 前 M 个 application，导出这些 application 当天的**全部**逐笔（不只差异笔）——
+# 只给差异笔会把「分对的长什么样」丢掉，规则迭代容易过拟合。
+EVOLVE_TOP_CATEGORIES = 5
+EVOLVE_APPS_PER_CATEGORY = 20
+EVOLVE_MIN_UNION = 100
+EVOLVE_TX_FILE = "risk_000008_evolve_transactions.csv"
+EVOLVE_SELECTION_FILE = "risk_000008_evolve_selection.csv"
 
 
 def detail_days(path: Path):
@@ -1920,6 +1933,39 @@ def build_category_details(detail: pd.DataFrame) -> dict:
     return out
 
 
+def evolve_selection(detail: pd.DataFrame, cats: list[dict],
+                     overall_rate: float | None) -> pd.DataFrame:
+    """
+    Evolve 圈选清单：先圈出差异率高于整体差异率（overall_rate）的类别，并集低于
+    EVOLVE_MIN_UNION 的小类别剔除；再按差异笔数取前 N 类，每类按差异笔数取前 M 个
+    application。每行 = 类别 / application / 该 app 在该类的差异笔数 / 该类差异总笔数。
+    导出动作在 sync.export_evolve_transactions。
+    """
+    bucket, _types = bucket_and_type(detail)
+    apps = detail["application_id"].astype(str).str.strip()
+    df = pd.DataFrame({"category": bucket.to_numpy(), "application_id": apps.to_numpy()})
+    df = df[~df["application_id"].isin(("", "nan", "None"))]
+    counts = df.groupby(["category", "application_id"], sort=False).size()
+    present = set(counts.index.get_level_values(0))
+    rate = overall_rate if overall_rate is not None else 0.0
+    problem = [c for c in cats
+               if c["diff_count"] > 0
+               and c["union_count"] >= EVOLVE_MIN_UNION
+               and (c["diff_rate"] or 0.0) > rate]
+    problem.sort(key=lambda c: -c["diff_count"])
+    rows = []
+    for c in problem[:EVOLVE_TOP_CATEGORIES]:
+        if c["name"] not in present:
+            continue
+        sub = counts.loc[c["name"]].sort_values(ascending=False).head(EVOLVE_APPS_PER_CATEGORY)
+        for app_id, n in sub.items():
+            rows.append({"category": c["name"], "application_id": app_id,
+                         "app_diff_count": int(n),
+                         "category_diff_count": int(c["diff_count"])})
+    return pd.DataFrame(rows, columns=["category", "application_id",
+                                       "app_diff_count", "category_diff_count"])
+
+
 def bucket_and_type(detail: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
     """
     每笔差异的归属 Category 和类型 key。
@@ -2149,7 +2195,8 @@ def main() -> int:
     if not MONITORING_RULES and not ALERT_RULES:
         log("规则配置为空：本次不生成任何待办或预警")
 
-    # 先同步再读数据：线上 5 张 dash 表落到 input/，本次出图用的就是这一批新数据。
+    # 先同步再读数据：线上 5 张 dash 表 + 收入/负债流汇总落到 input/，
+    # 前 5 份是本次出图的数据，后 2 份只随 zip 归档。
     if args.skip_sync:
         log("跳过线上取数，直接使用 input/ 现有文件")
     else:
@@ -2792,6 +2839,35 @@ def main() -> int:
     out_html = out_dir / f"bscat_monitor_{ts:%Y%m%d_%H%M%S}.html"
     out_html.write_text(html, encoding="utf-8")
     log(f"生成 {out_html}  ({len(html.encode('utf-8'))/1024/1024:.1f} MB)")
+
+    # 圈选给 Evolve 的逐笔样本，随 zip 归档。上一期的两份先删掉：本期圈选为空或
+    # 导出失败时，旧文件跟着新 zip 发出去就是错数据。导出失败只警告不中止——
+    # 看板本身不依赖这两份文件。
+    tx_path = in_dir / EVOLVE_TX_FILE
+    sel_path = in_dir / EVOLVE_SELECTION_FILE
+    for stale in (tx_path, sel_path):
+        if stale.exists():
+            stale.unlink()
+    if args.skip_sync:
+        log("跳过 Evolve 逐笔圈选（--skip-sync，不连线上）")
+    else:
+        overall = facts[data_date]["summary"].get("all_difference_rate") or 0.0
+        sel = evolve_selection(detail_now, cats, overall)
+        apps = sel["application_id"].drop_duplicates().tolist()
+        if sel.empty:
+            log(f"Evolve 圈选: 没有差异率高于整体 {overall:.2%} 的问题类别，不导逐笔")
+        else:
+            try:
+                n_tx = export_evolve_transactions(apps, data_date, tx_path)
+                sel.to_csv(sel_path, index=False, encoding="utf-8-sig")
+                log(f"Evolve 圈选: {sel['category'].nunique()} 个类别 × "
+                    f"{len(apps)} 个 application（整体差异率 {overall:.2%}）"
+                    f" → 逐笔 {n_tx:,} 行")
+            except Exception as exc:
+                for p in (tx_path, sel_path):
+                    if p.exists():
+                        p.unlink()
+                log(f"Evolve 逐笔导出失败（不影响出图，zip 里不会有这两份）: {exc}")
 
     zip_path, n_csv = archive_run(root, in_dir, out_html, ts)
     log(f"归档 {zip_path}（{n_csv} 个 CSV + 1 个 HTML，"

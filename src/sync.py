@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""同步 BSCAT 监控看板数据：执行 sync.sql 的 5 个查询块，写入 input/。
+"""同步 BSCAT 监控看板数据：执行 sync.sql 的 7 个查询块，写入 input/。
 
+前 5 块是看板底表，后 2 块是收入/负债流汇总（只随 zip 归档，monitor.py 不读）。
 monitor.py 默认在启动时调用 sync_all() 自动同步；也可以单独运行本脚本：
     python src/sync.py
 
@@ -34,10 +35,17 @@ QUERY_SPECS = (
     {"id": "3", "file": "risk_000008_dash_group.csv",    "title": "业务板块"},
     {"id": "4", "file": "risk_000008_dash_category.csv", "title": "分类别指标"},
     {"id": "5", "file": "risk_000008_dash_detail.csv",   "title": "逐笔明细"},
+    {"id": "6", "file": "risk_000008_log_income_summary.csv",
+     "title": "收入流汇总（仅归档）"},
+    {"id": "7", "file": "risk_000008_log_liability_summary.csv",
+     "title": "负债流汇总（仅归档）"},
 )
 
 _BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", flags=re.S)
 _LINE_COMMENT_RE = re.compile(r"--[^\n]*")
+# Evolve 圈选导出的值直接拼进 SQL 字面量，只放行纯 ID / 日期的形状。
+_APP_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
 def split_statements(sql_text):
@@ -88,6 +96,35 @@ def run_query_to_csv(sql, path, query_fn):
         if temporary.exists():
             temporary.unlink()
     return int(len(df)), list(df.columns)
+
+
+def build_evolve_transactions_sql(application_ids, sample_date):
+    """圈选 application 当天的全部逐笔。没有合法 application_id 时返回 None。"""
+    ids = sorted({str(a).strip() for a in application_ids
+                  if _APP_ID_RE.match(str(a).strip())})
+    if not ids:
+        return None
+    sample_date = str(sample_date).strip()
+    if not _DATE_RE.match(sample_date):
+        raise ValueError(f"sample_datetime {sample_date!r} 不是 yyyy-MM-dd")
+    in_list = ", ".join(f"'{a}'" for a in ids)
+    return (
+        "SELECT * FROM model.tmp_eliam_risk_000008_log_transactions\n"
+        f"WHERE sample_datetime = '{sample_date}'\n"
+        f"  AND application_id IN ({in_list})"
+    )
+
+
+def export_evolve_transactions(application_ids, sample_date, path):
+    """导出圈选的逐笔到 path；返回行数。无合法 ID 返回 0，失败抛异常。"""
+    sql = build_evolve_transactions_sql(application_ids, sample_date)
+    if sql is None:
+        return 0
+    query_fn = load_query_fn()
+    if query_fn is None:
+        raise RuntimeError("未找到 hive_config.query_to_df")
+    rows, _columns = run_query_to_csv(sql, path, query_fn)
+    return rows
 
 
 def sync_all(input_dir: Path = INPUT_DIR) -> int:
