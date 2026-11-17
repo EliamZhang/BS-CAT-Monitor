@@ -1,90 +1,33 @@
 -- ============================================================================
 -- BS-CAT 每日定时任务整合版
--- 执行顺序：
---   1. 上游：按 inserttime 读取每日增量，生成 log_* 结果表并更新 log_run
---   2. 下游：依据 log_run 中的 sample_datetime 刷新 Dashboard 结果表
--- 使用前注意：
---   * 需要先单独完成上游、Dashboard 目标表的一次性分区迁移（如尚未迁移）。
---   * 请确认调度任务中的 SET 配置对后续写入生效；本文件不包含独立的配置查询语句。
---   * 日常调度建议在每日目标数据完整入库后运行；重跑应使用相同业务窗口。
+-- 执行顺序：先阶段一 log_*（按 inserttime 最近 7 天增量），再阶段二 Dashboard（分区窗口取自 log_run）
+-- 使用前：先完成一次性分区迁移（migrate_once.sql），并确认 SET 与写入在同一会话执行
 -- ============================================================================
 
 -- ============================================================================
---  BS-CAT 策略运行日志 -> 三张结果表（按 inserttime 每日增量版）
+--  阶段一：BS-CAT 策略运行日志 -> log_* 结果表（按 sample_datetime 日增量）
 --
---  引擎   : Hive / Spark SQL（Spark 3.x 语法，from_json / LATERAL VIEW explode）
---  源表   : ods.aus_cbd_gidp_core_gidp_strategy_run_log
---           直连即可，**不需要前置清洗**——日志 CSV 里的引号错位是「导出成
---           CSV」这一步造成的，ODS 表里 strategy_result 本来就是合法 JSON 字符串。
---           （只有走离线 CSV 那条路才需要 00_prepare_log.py，
---             见同目录 11_optional_csv_path.sql）
---  产出   : 全部落在 model 库，命名 = model.tmp_eliam_<策略码小写>_log_<用途>
---             **日增量（按 sample_datetime 分区，只替换本批窗口覆盖到的分区，历史保留）**
---               model.tmp_eliam_risk_000008_log_transactions       24 列
---               model.tmp_eliam_risk_000008_log_income_summary     22 列
---               model.tmp_eliam_risk_000008_log_liability_summary  20 列
-----             中间对象（每次重建，不是产出）
---               model.tmp_eliam_risk_000008_log_src   源表过滤视图
---               model.tmp_eliam_risk_000008_log_run   剥信封后（**勿删**：
---                  看板脚本 compel_label.sql 靠它的 sample_datetime 识别本批窗口）
---               model.tmp_eliam_risk_000008_log_out   拆四段 JSON 后
---             临时 stage（每次 DROP 重建，可随时手删，不算产出）
---               model.tmp_eliam_risk_000008_log_<用途>_stage
+--  源表  : ods.aus_cbd_gidp_core_gidp_strategy_run_log（直连，无需前置清洗）
+--  产出  : model.tmp_eliam_risk_000008_log_transactions       24 列
+--          model.tmp_eliam_risk_000008_log_income_summary     22 列
+--          model.tmp_eliam_risk_000008_log_liability_summary  20 列
+--          model.tmp_eliam_risk_000008_log_accounts            4 列（银行 / 卡类型）
+--  中间  : log_src（视图）/ log_run（**勿删**，看板靠它识别本批分区）/ log_out
+--  临时  : *_stage（每次 DROP 重建）
 --
---  ⚠️⚠️ **增量语义（本版与旧「整表 DROP+重建」版最大的区别）**
---     产出表是 PARQUET + 按 sample_datetime 分区，写入走「stage 暂存 -> 目标表
---     首次建（只借 schema）-> INSERT OVERWRITE 整分区替换」：**只替换本批窗口
---     覆盖到的 sample_datetime 分区，其它历史分区原样保留**，不再 DROP 整表。
---     同一天重跑幂等。由此带来的三个行为，使用前必须知道：
---       1. 窗口里某天这次没有任何成功记录 -> 该天旧分区不会被清空（写入集合
---          里没有它）。要清就手动 ALTER TABLE ... DROP PARTITION 后重跑。
---       2. **sample_datetime** 是产出表的最后一列（分区列），取日志 inserttime 前 10 位。
---          本版本按 inserttime 最近 7 天窗口读取，因此正常情况下写入最近 7 天的 sample_datetime 分区。
---       3. 看板脚本从 log_run 的 sample_datetime 集合识别本批需要刷新的分区。
---
---  ⚠️⚠️ **依赖一次性迁移**：旧版产出表是无分区的，结构与本版不同。第一次切
---     增量模式时，先单独跑一次同目录的 migrate_once.sql，再按正常流程跑本文件。
---     忘了迁移的话：分区写入都带显式 PARTITION (sample_datetime)，会在第一条写入当场报
---     "table ... is not partitioned"（不会静默写错位数据）；显式分区写入也会报同样的错。
---
---  ⚠️⚠️ **务必「本文件全选 + 一次执行」**（SET 要和写入在同一会话里才生效）。
---     STEP A0 把 spark.sql.sources.partitionOverwriteMode 设成 DYNAMIC——没有
---     它，INSERT OVERWRITE 会先清掉**所有**分区再写窗口，历史全丢。
---     切增量后的第一次，请先单独跑一次 STEP A0 最后那行不带等号的 SET，
---     确认回显是 DYNAMIC 再全选跑整份。若回显不是 DYNAMIC，停下来反馈。
---
---  ⚠️ 策略码写死在表名和 STEP 0 的 WHERE 两处，换策略（如 RISK_000009）时
---     要同时改：搜索替换 risk_000008 → risk_000009，以及 WHERE strategy_code。
---
---  列集口径 = 当前版本出参契约（classification_core/service.py 的
---  _ILLION_ROW_EXCLUDE / _STREAM_SUMMARY_EXCLUDE），不是 8/5 那份 report1.xlsx。
---  差异：report1.xlsx 的 transactions 29 列里有 9 列是平台侧的
---        （job_id / bsb / account_no / classification_*），模型出参不产生；
---        income_summary 的 bscat / bank_account_id / application_id / counterparty
---        与账户元数据 account_type / bank / credit_limit 也一样。按约定不补。
---
---  已用 spark3-35563.csv（10 应用 / product=fundo / run_status=1）实测核对：
---    · 出参挂在 strategy_result.$.data                      ✅
---    · 逐笔行 14 字段、income 14、liability 12、category 8  ✅ 与下面的 schema 逐一对应
---    · 逐笔 explode 行数 == bscat_stats.txn_raw_input_cnt   ✅ 10/10 一致
---  但**本机没有 pyspark / java，这份 SQL 没在 Spark 上真跑过**，只在
---  sql/99_dryrun_check.py 里用 pandas 等价复现验证了逻辑与列名。
---  改增量版后，结构自检换成了 sql/97_lint_incremental.py（查 stage/目标表
---  配对、分区列位置、DROP 白名单、SET DYNAMIC 是否在位）。
---
---  旧版（整表 DROP+重建）留档在 sql/10_report1_tables.sql。
+--  ⚠️ 增量语义：stage -> 首次建表（只借 schema）-> INSERT OVERWRITE 整分区替换，
+--     只替换本批窗口的 sample_datetime 分区，历史保留，同一天重跑幂等。
+--     窗口里某天这次没有成功记录时，该天旧分区不会被清空。
+--  ⚠️ 依赖一次性分区迁移，未迁移会在第一条分区写入当场报 "table ... is not partitioned"。
+--  ⚠️ 必须全选一次执行：SET DYNAMIC 不在同一会话时，INSERT OVERWRITE 会先清空所有分区。
+--  ⚠️ 策略码 risk_000008 写死在表名和 STEP 0 两处，换策略需全局替换。
 -- ============================================================================
 
 
 -- ---------------------------------------------------------------------------
--- STEP A0  会话设置（必须先于所有写入执行，全选跑自然带上）
---
--- 动态分区覆盖：INSERT OVERWRITE 只替换「stage 里实际出现的 sample_datetime 分区」，
--- 窗口外的历史分区原样保留。这是整个增量逻辑的地基。
--- ⚠️ 会话级设置：客户端里把本文件全选、一次执行即可。若你的工具是「逐条语句
---    各开一个新会话」，这里会失效，而失效后 INSERT OVERWRITE 会先清空所有
---    分区再写窗口 = 丢历史。切增量后的第一次请先单独跑下面最后一行，确认
---    回显 DYNAMIC 再继续。
+-- STEP A0  会话设置（必须先于所有写入，全选一次执行）
+-- DYNAMIC：INSERT OVERWRITE 只替换 stage 中出现的分区，否则清空所有分区（丢历史）。
+-- 工具若逐条语句各开新会话，这里会失效——第一次请先单独确认回显 DYNAMIC。
 -- ---------------------------------------------------------------------------
 SET spark.sql.sources.partitionOverwriteMode = DYNAMIC;
 SET hive.exec.dynamic.partition.mode = nonstrict;
@@ -92,13 +35,11 @@ SET hive.exec.dynamic.partition.mode = nonstrict;
 
 
 -- ---------------------------------------------------------------------------
--- STEP 0  源表视图：每日按 inserttime 增量读取
---
--- 每次调度读取「最近 7 天 00:00（含）至今天 00:00（不含）」入库的日志。
--- 滚动窗口：每天重算最近 7 天，某天缺数会在之后 7 天内自愈；与 sync.sql 的 7 天窗口对齐。
--- sample_datetime 仍取 inserttime 前 10 位，因此本次读取的数据按入库日期写入对应分区。
--- 注意：如果源表按 par_dt 分区，而查询没有 par_dt 条件，可能会扫描大量源表分区；
---       若要做分区裁剪，需确认 par_dt 与 inserttime 的关系，再增加安全的 par_dt 范围。
+-- STEP 0  源表视图：滚动读取最近 7 天（含 7 天前 00:00，不含今天 00:00）入库的日志，
+-- 与 sync.sql 的 7 天窗口对齐，缺数会在之后 7 天内自愈。sample_datetime 取
+-- inserttime 前 10 位（异常时回落 par_dt），因此按入库日期写入对应分区。
+-- ⚠️ 源表若按 par_dt 分区，当前 inserttime 条件可能全表扫描——上线前检查执行计划。
+-- 同一策略若有多个模型 / release 混跑，再补 release_id。
 -- ---------------------------------------------------------------------------
 DROP VIEW IF EXISTS model.tmp_eliam_risk_000008_log_src;
 CREATE VIEW model.tmp_eliam_risk_000008_log_src AS
@@ -110,38 +51,14 @@ WHERE strategy_code = 'RISK_000008'          -- 包装分类模型的策略编�
   AND inserttime >= concat(date_format(date_sub(current_date(), 7), 'yyyy-MM-dd'), ' 00:00:00')
   AND inserttime <  concat(date_format(current_date(), 'yyyy-MM-dd'), ' 00:00:00')
 ;
--- 若同一策略下有多个模型/多个 release 混跑，再补 release_id（本批为 118）。
---
--- ⚠️ 性能提醒：当前增量条件是 inserttime，而源表可能按 par_dt 分区。
---    若 par_dt 与 inserttime 不是严格同日关系，不能随意用 par_dt 限制数据，否则可能漏数。
---    上线前请检查执行计划/扫描分区数；若全表扫描，需要结合数据延迟规律增加安全的
---    par_dt 分区裁剪范围，或采用调度平台维护的增量水位。
-
--- ── 离线 CSV 通路已挪走 ─────────────────────────────────────────────────
--- 备选方案（只在「手上只有导出的 CSV、连不上 ODS 表」时才用）挪到了
--- 同目录的 11_optional_csv_path.sql。
---
--- 本文件按当前日期自动读取最近 7 天的 inserttime 窗口，无需每天手动修改日期。
--- ─────────────────────────────────────────────────────────────────────────
+-- 离线 CSV 备选通路（连不上 ODS 时才用）见 11_optional_csv_path.sql。
 
 
 -- ---------------------------------------------------------------------------
 -- STEP 1  剥壳：取出成功运行，并把模型出参从响应信封里拎出来
---
--- 出参形状（已实测）：
---   成功  strategy_result = {"code":"0000","data":{...模型出参...},...}
---   失败  strategy_result = {"code":"2002","data":null,"message":"...",...}
--- 所以 run_status = '1' 且 data 非空、非字面量 'null' 就是一次有效运行。
--- 失败记录里 code 恒为 2002，成功恒为 0000，两者可互为交叉校验。
---
--- 另注：strategy_content.midVarJson 里另存了一份同样的出参，是备用源；
---      本 SQL 用 strategy_result，因为它才是响应本体、且带 code 可判成败。
---      若某批日志的 strategy_result 被截断，可改从 midVarJson 取。
--- 注意 run_status 在两条源通路里类型不同（ODS 表是 INT，CSV 外部表是 STRING），
--- 所以统一 CAST 成字符串再比，这样同一份 SQL 两边都能跑。
---
--- 本批窗口 = STEP 0 中 inserttime 的最近 7 天范围：log_run / log_out 每次重建，只装本批日志。
--- ⚠️ log_run 别删——看板脚本靠它的 sample_datetime 集合识别「本批要刷新哪些分区」。
+-- 成功 = run_status '1' 且 data 非空、非 'null'；run_status 两条源通路类型不同，统一 CAST 再比。
+-- strategy_content.midVarJson 是备用源，strategy_result 被截断时可改取。
+-- log_run / log_out 每次重建、只装本批窗口；log_run 勿删（看板靠它的分区集合）。
 -- ---------------------------------------------------------------------------
 
 DROP TABLE IF EXISTS model.tmp_eliam_risk_000008_log_run;
@@ -192,18 +109,9 @@ FROM model.tmp_eliam_risk_000008_log_run r
 
 
 -- ---------------------------------------------------------------------------
--- STEP 2  表一：逐笔交易
---
--- v1 / illion（product = fundo）：行是固定字段集，用下面的固定 schema 解析。
---
--- ⚠️ v2 / wagego 的逐笔行 = 上游字段原顺序透传 + counterparty / bscat / stream_id，
---    列集由入参报文决定、不固定。本批日志 10 个应用全是 fundo，走不到 wagego；
---    若将来日志里混入 wagego 报文，固定 schema 会**静默吃掉上游列**（不报错），
---    届时要么按报文列集补 schema，要么整行转 MAP<STRING,STRING> 再按 key 取。
---
--- 增量写法：stage 只装窗口数据 -> 目标表首次建（只借 schema，空表）-> 整分区替换。
--- ⚠️ sample_datetime 必须是 SELECT 的最后一列（分区列约定，值 = inserttime 前
---    10 位），下面已挪到末尾。
+-- STEP 2  表一：逐笔交易（24 列）
+-- 固定 schema 只解析 fundo 报文；混入 wagego（列集不固定）会静默吃掉上游列，
+-- 届时需补 schema 或整行转 MAP 再按 key 取。sample_datetime 必须是 SELECT 最后一列。
 -- ---------------------------------------------------------------------------
 DROP TABLE IF EXISTS model.tmp_eliam_risk_000008_log_transactions_stage;
 CREATE TABLE model.tmp_eliam_risk_000008_log_transactions_stage
@@ -258,26 +166,21 @@ LATERAL VIEW explode(
 WHERE v.product IS NULL OR v.product = 'fundo' OR v.product = ''
 ;
 
--- 首次切增量时建表（借 stage 的 schema，不装数据）；之后每次跑都是 no-op
+-- 首次切增量时建表（只借 schema），之后每次都是 no-op
 CREATE TABLE IF NOT EXISTS model.tmp_eliam_risk_000008_log_transactions
 USING PARQUET PARTITIONED BY (sample_datetime)
 AS SELECT * FROM model.tmp_eliam_risk_000008_log_transactions_stage WHERE FALSE
 ;
 
--- 每日写入：只替换窗口覆盖到的 sample_datetime 分区，历史分区不动。
--- 显式 PARTITION (sample_datetime)：目标表若还是旧的非分区表（忘了迁移），这里会当场
--- 报 "table ... is not partitioned"，不会静默按位置写错位数据。
+-- 每日写入：显式 PARTITION (sample_datetime)，只替换本批窗口的分区，历史天不动。
+-- 目标表若还是旧的非分区表（忘了迁移），这里会当场报 "table ... is not partitioned"。
 INSERT OVERWRITE TABLE model.tmp_eliam_risk_000008_log_transactions PARTITION (sample_datetime)
 SELECT * FROM model.tmp_eliam_risk_000008_log_transactions_stage
 ;
 
 
 -- ---------------------------------------------------------------------------
--- STEP 3  表二：收入流汇总（14 列）
---
--- 出参已剔除 bscat / bank_account_id / application_id / counterparty 与
--- 账户元数据三列（_STREAM_SUMMARY_EXCLUDE），所属应用从顶层回显标识取。
--- 增量写法同 STEP 2（stage -> 首次建表 -> 整分区替换），sample_datetime 在末尾。
+-- STEP 3  表二：收入流汇总（22 列）——所属应用从顶层回显标识取
 -- ---------------------------------------------------------------------------
 DROP TABLE IF EXISTS model.tmp_eliam_risk_000008_log_income_summary_stage;
 CREATE TABLE model.tmp_eliam_risk_000008_log_income_summary_stage
@@ -338,8 +241,7 @@ SELECT * FROM model.tmp_eliam_risk_000008_log_income_summary_stage
 
 
 -- ---------------------------------------------------------------------------
--- STEP 4  表三：负债流汇总（12 列）
--- 增量写法同 STEP 2（stage -> 首次建表 -> 整分区替换），sample_datetime 在末尾。
+-- STEP 4  表三：负债流汇总（20 列）
 -- ---------------------------------------------------------------------------
 DROP TABLE IF EXISTS model.tmp_eliam_risk_000008_log_liability_summary_stage;
 CREATE TABLE model.tmp_eliam_risk_000008_log_liability_summary_stage
@@ -395,126 +297,73 @@ SELECT * FROM model.tmp_eliam_risk_000008_log_liability_summary_stage
 ;
 
 
--- 上游自检查询已移除：该任务用于定时写入，不输出独立查询结果。
+-- ---------------------------------------------------------------------------
+-- STEP 5  表四：账户元数据（4 列）：按 (sample_datetime, bank_account_id) 去重，供 dash_detail 关联
+-- ---------------------------------------------------------------------------
+DROP TABLE IF EXISTS model.tmp_eliam_risk_000008_log_accounts_stage;
+CREATE TABLE model.tmp_eliam_risk_000008_log_accounts_stage
+USING PARQUET PARTITIONED BY (sample_datetime) AS
+SELECT
+  a.bank_account_id,
+  MAX(a.bank)         AS bank,
+  MAX(a.account_type) AS account_type,
+  v.sample_datetime
+FROM model.tmp_eliam_risk_000008_log_out v
+LATERAL VIEW explode(
+  from_json(v.accounts_json, '
+    ARRAY<STRUCT<
+      bank_account_id: BIGINT,
+      bank:            STRING,
+      account_type:    STRING
+    >>')
+) et AS a
+WHERE a.bank_account_id IS NOT NULL
+GROUP BY v.sample_datetime, a.bank_account_id
+;
+
+CREATE TABLE IF NOT EXISTS model.tmp_eliam_risk_000008_log_accounts
+USING PARQUET PARTITIONED BY (sample_datetime)
+AS SELECT * FROM model.tmp_eliam_risk_000008_log_accounts_stage WHERE FALSE
+;
+
+INSERT OVERWRITE TABLE model.tmp_eliam_risk_000008_log_accounts PARTITION (sample_datetime)
+SELECT * FROM model.tmp_eliam_risk_000008_log_accounts_stage
+;
 
 
 -- ============================================================================
--- 阶段二：Dashboard 监控数据刷新
--- 必须在阶段一成功完成后执行；本阶段通过 log_run 获取本批刷新日期。
+-- 阶段二：Dashboard 监控数据刷新（必须在阶段一成功后执行，分区窗口取自 log_run）
 -- ============================================================================
 
 -- ============================================================================
---  蓝鲸策略运行日志  ->  Category 差异看板（6 张表，**每日增量版**）
+--  Dashboard 差异看板（7 张 dash 表，按 sample_datetime 日增量）
 --
---  引擎   : Hive / Spark SQL（用到 CONCAT_WS / COLLECT_LIST / 窗口函数 / 幂等 CASE）
---  上游   : model.tmp_eliam_risk_000008_log_transactions   （先跑 report_table.sql）
---           它是**逐日累计**的：本文件读到的历史天数取决于上游累计过多少。
---  产出   : 全部落在 model 库，命名 = model.tmp_eliam_risk_000008_dash_<用途>
---             **全部按天累积（每张表都带 sample_datetime 列、按 sample_datetime 分区，只替换本批
---             窗口覆盖到的天，历史天不动）**
---               ..._dash_base         口径基座（clean/normalize/status/大类）
---               ..._dash_summary      核心指标         每天 15 行 x  8 列
---               ..._dash_category     逐Category差异   每天 各Category一行 x 33 列
---               ..._dash_flow         差异流向        每天 各流向一行 x 14 列
---               ..._dash_group        业务大类聚类      每天 6 行 x 20 列
---               ..._dash_detail       逐笔排查明细      每天 各差异笔一行 x 22 列
---               ..._dash_trend        按日趋势          每天一行 x 12 列
---             临时 stage（每次 DROP 重建，可随时手删，不算产出）
---               ..._dash_<用途>_stage
+--  上游  : model.tmp_eliam_risk_000008_log_transactions（逐日累计）
+--  产出  : dash_base 口径基座 / dash_summary 每天 15 行 / dash_category 每 Category 一行 33 列 /
+--          dash_flow 每流向一行 14 列 / dash_group 每天 6 行 20 列 /
+--          dash_detail 每差异笔一行 24 列 / dash_trend 每天一行 12 列
+--  临时  : *_stage（每次 DROP 重建）
 --
---  ⚠️⚠️ **本版与旧「整表 DROP+重建」版的行为差异**
---     1. **本文件不设窗口**：要刷新哪些 sample_datetime 分区，从 log_run 的 sample_datetime 集合读
---        （那是 report_table.sql 每跑一次重建的、只装本批窗口的中间表）。
---        所以正确顺序永远是：先 report_table.sql，再本文件。
---     2. **七张 dash 表全部按天累积**：五张看板（summary/category/flow/group/
---        detail）都改成「每天一组行」——差异贡献率等也是**各天内部**
---        计算（= 原来「一批一次」的语义，线上每天跑一批，效果一致），每张表都
---        带 sample_datetime 列、按 sample_datetime 分区。重跑同一批 = 只替换那几天的分区。
---        base / trend 同理（trend 本来就是按天）。不删任何表对象。
+--  ⚠️ 本阶段不设窗口：刷新哪些分区由 log_run 的 sample_datetime 决定，必须先跑阶段一。
+--  ⚠️ 依赖一次性分区迁移，未迁移会在显式分区写入时当场报 "table ... is not partitioned"。
+--  ⚠️ 必须全选一次执行：SET DYNAMIC 不在同一会话时，INSERT OVERWRITE 会先清空所有分区。
+--  ⚠️ 产出列名不能含空格、逗号、分号等字符（Hive 拿列名做目录名，报
+--     INVALID_COLUMN_NAME_AS_PATH，遇到第一个就抛，不代表只有一列有问题）。汉字合法。
+--  ⚠️ 字符串和注释里都不要写 ASCII 分号：客户端按朴素 split 切语句，会从中间截断。
+--     拼接分隔符一律写 CONCAT(CHR(59), ' ')。
+--  ⚠️ 并列项用 row_ord 做 tie-break，只影响「流向 / 交易方向 / 跨组流向」的并列顺序。
+--  ⚠️ 策略码写死在表名里，换策略全局替换。
 --
---  ⚠️ 产出表的日期键叫 **sample_datetime**（2026-10-09 起，替代原来的 par_dt）：
---     值 = 日志 inserttime 的前 10 位（形如 '2026-09-22'），11 张表都按它分区；
---     inserttime 异常时上游会回落到源表分区 par_dt。源表 par_dt 只在上游
---     report_table.sql 的取数窗口里出现，产出里没有这个名字。
---
---  ⚠️⚠️ **和 report_table.sql 一样依赖一次性迁移**（旧产出表结构不同）。
---     切换时先跑一次同目录的 migrate_once.sql，再按 report_table -> 本文件顺序跑。
---     忘了迁移的话：base / trend 的写入带显式 PARTITION (sample_datetime)，会当场报
---     "table ... is not partitioned"（不会静默写错位数据）；D7 的
---     SHOW PARTITIONS 守卫也会报同样的错。
---
---  ⚠️⚠️ **2026-11-13 删了 3 个优先级列**（dash_category 的「建议优先级」、
---     dash_flow 的「排名」/「建议优先级」、dash_detail 的「排查优先级」）。
---     三张目标表由 CREATE TABLE IF NOT EXISTS 建，线上旧表还带着这些列，
---     直接跑 INSERT 会因列数不符报错。上线前对这三张表做一次性重建
---     （DROP 后重跑本文件）；重建会丢掉这三张表的历史分区，要保留就先备份，
---     或用更宽的 log_run 窗口重跑补齐。
---
---  ⚠️⚠️ **必须「本文件全选 + 一次执行」**。STEP A0 把
---     spark.sql.sources.partitionOverwriteMode 设成 DYNAMIC；没有它，
---     base / trend 的 INSERT OVERWRITE 会先清掉所有分区再写窗口，历史全丢。
---     第一次请先单独跑 STEP A0 最后那行不带等号的 SET，确认回显 DYNAMIC 再继续。
---
---  口径来源 = D:\project\蓝鲸\label_compare.py 的 compute_* 函数。
---  **本 SQL 的口径已逐表 diff 验证过**：把同样的逻辑先用 pandas 复现，再与
---  label_compare.py 的真实函数对拍，5 张有 Python 对标的表全部逐行逐列一致
---  （见 sql/99_dryrun_dashboard.py）。改口径要同步改那个脚本再跑一遍。
---
---  四处**刻意的**与 Python 版不一致：
---    1. dash_detail 是 21 列（另加 sample_datetime 列 = 22 列）而非 28 列——线上日志没有
---       account_type、classification_status / engine / rule_id / reason、
---       sample_datetime 这 6 列，另删掉「排查优先级」1 列（2026-11-13，P 档由看板自己定）。
---    2. dash_trend 是新增的：原 04_模型监控 sheet 靠本地 .monitor/snapshots.jsonl
---       存历史，线上没有这个文件，改成按 sample_datetime 分批。原版的「引擎命中率趋势」
---       做不了（classification_engine 不在日志里）。
---    3. **列名里的空格换成了下划线**（只是表头名字，数据一字未动）：
---         dash_flow   : illion Category      -> illion_Category
---                       finv Category        -> finv_Category
---         dash_detail : 上面两个 + illion Category_原始 -> illion_Category_原始
---                                finv Category_原始   -> finv_Category_原始
---       原因见下面那条 ⚠️。
---    4. 所有看板**按天分组、各带 sample_datetime 列**（Python 版是「一批一份」的单批
---       视角；线上每天跑一批，于是每天一组行累积在表里，效果等价）。
---
---  ⚠️⚠️ **产出列名里不能有空格**（以及逗号、分号、花括号、圆括号、等号、制表符、换行）。
---     Hive 写表时拿列名当子目录名，Spark 的 DataSourceUtils.checkFieldNames
---     在 FileFormatWriter.write 里无条件检查（跟文件格式无关，USING PARQUET 也躲不掉），
---     命中就抛 [INVALID_COLUMN_NAME_AS_PATH]，而且 **按 schema 顺序遇到第一个就抛**,
---     所以报错只显示一个名字，不代表只有一列有问题。汉字是合法的（dash_flow 的
---     `是否关键Category` / `差异类型` 都通过了检查），**只有空格这类字符不行**。
---     sql/97_lint_incremental.py 会静态检查产出列名。
---     注意：只有**产出列名**受限，字符串字面量里的空格随便写。
---
---  ⚠️ 并列时的顺序：Python 版用 pandas `value_counts()`，并列按**首次出现顺序**。
---     SQL 没有天然的「行序」，所以本脚本用 ROW_NUMBER() OVER (ORDER BY log_id,
---     transaction_id) 造了一个 row_ord 当 tie-break。它只影响「主要流出去向 /
---     主要流入来源 / 主要交易方向 / 主要跨组流向」里**并列项之间的先后**，
---     不影响任何计数与比率。若你的表恰好与导出前的行序一致，结果就与 Python 版
---     完全一样；否则并列项可能换个位置。真在意就把 row_ord 的 ORDER BY 换成
---     你自己的行序口径。
---
---  ⚠️ 策略码写死在表名里（risk_000008）。换策略要全局搜索替换。
---
---  ⚠️⚠️ **不要在字符串字面量或注释里写 ASCII 分号。** 蓝鲸/Kyuubi 的 SQL 客户端
---     是拿朴素 split 切语句的（不认引号），一句里只要有 `引号-分号-空格` 就会被
---     从中间切成两半，后半段以「引号逗号」开头，Spark 直接 PARSE_SYNTAX_ERROR。
---     所以拼接分隔符一律写成 CONCAT(CHR(59), ' ')，不要直接写那个两字符字面量。
---     sql/97_lint_incremental.py 会静态检查这一点（连这条注释本身也查）。
---
---  ⚠️ 本机没有 pyspark / java，这份 SQL 没在 Spark 上真跑过；校验是在 pandas
---     层做的等价复现 + 差分对拍。上线前请在测试环境完成数据核对。
---  旧版（整表 DROP+重建）留档在 sql/20_dashboard_tables.sql。
+--  口径来源 label_compare.py 的 compute_*：5 张有 Python 对标的表已逐行逐列对拍一致。
+--  与 Python 版的有意差异：dash_detail 缺线上日志没有的列（另补银行名称 / 卡类型 2 列）、
+--  dash_trend 为线上新增、列名里的空格改成下划线、各表按天分组。
 -- ============================================================================
 
 
 -- ---------------------------------------------------------------------------
--- STEP A0  会话设置（必须先于所有写入执行，全选跑自然带上）
---
--- 动态分区覆盖：base / trend 的 INSERT OVERWRITE 只替换「stage 里实际出现的
--- sample_datetime 分区」，其它历史分区原样保留。
--- ⚠️ 会话级设置：全选一次执行即可。若工具是「逐条语句各开新会话」这里会失效，
---    失效后 INSERT OVERWRITE 会先清空所有分区再写窗口 = 丢历史。
---    切增量后的第一次请先单独跑下面最后一行，确认回显 DYNAMIC 再继续。
+-- STEP A0  会话设置（必须先于所有写入，全选一次执行）
+-- DYNAMIC：INSERT OVERWRITE 只替换 stage 中出现的分区，否则清空所有分区（丢历史）。
+-- 逐条语句各开新会话的工具会让这里失效，第一次请先单独确认回显 DYNAMIC。
 -- ---------------------------------------------------------------------------
 SET spark.sql.sources.partitionOverwriteMode = DYNAMIC;
 SET hive.exec.dynamic.partition.mode = nonstrict;
@@ -522,24 +371,19 @@ SET hive.exec.dynamic.partition.mode = nonstrict;
 
 
 -- ---------------------------------------------------------------------------
--- STEP D0  口径基座（增量：只替换本批窗口的 sample_datetime 分区）
+-- STEP D0  口径基座（增量：只替换本批窗口的分区）
 --
--- 把逐笔交易表加工成后面所有看板共用的形态，对应 label_compare.py 的
--- prepare_comparison_data + assign_group_columns。
+-- 把逐笔交易加工成所有看板共用的形态，对应 label_compare.py 的
+-- prepare_comparison_data + assign_group_columns：
+--   ref = illion 侧，取 transactions.category；cand = 模型侧，取 transactions.bscat
+-- 三段式 row_ord -> clean -> normalize，每层只写一次表达式：
+--   clean(x)  = 折叠空白 + 去首尾 + 空值词表判空（保留原大小写）
+--   normalize = 小写 -> '&' 变 ' and ' -> [-_/] 变空格 -> 非字母数字变空格 -> 折叠空白
+--               SQL 用 [^\p{L}\p{N}_\s] 对应 Python 的 \w（UNICODE），本批 Category
+--               全 ASCII，两者等价。
 --
---   ref  = illion 侧，取 transactions.category
---   cand = 模型侧，取 transactions.bscat
---
--- 三段式：row_ord -> clean -> normalize。每一层只写一次表达式，避免抄错。
---
--- clean(x)   = 折叠空白 + 去首尾 + 空值词表判空（保留原大小写）
--- normalize  = 小写 -> '&' 变 ' and ' -> [-_/] 变空格 -> 非字母数字变空格 -> 折叠空白
---              ⚠️ SQL 用 [^\p{L}\p{N}_\s] 对应 Python 的 \w(UNICODE)；
---                 本批 Category 全 ASCII，两者等价。
---
--- 增量写法：row_ord / 展示名 / 大类都在**全表（含历史）**上算，保证跨天一致
--- （tie-break 行序、展示名众数与全量重建逐字节一致）；只有写入按「本批窗口的
--- sample_datetime 分区」替换 —— 窗口 = log_run 的 sample_datetime 集合。
+-- row_ord / 展示名 / 大类都在全表（含历史）上算，保证跨天一致；只有写入按 log_run
+-- 的 sample_datetime 集合替换本批分区。
 -- ---------------------------------------------------------------------------
 
 DROP TABLE IF EXISTS model.tmp_eliam_risk_000008_dash_base_stage;
@@ -581,9 +425,9 @@ keyed AS (
       '[-_/]+', ' '), '[^\\p{L}\\p{N}_\\s]', ' '), '\\s+', ' ')), '') AS cand_key
   FROM cleaned c
 ),
--- 展示名：每个 key 取出现最多的 clean 值；并列取字典序最小。
--- ⚠️ 必须分两趟：ref 侧先建，cand 侧只补 ref 侧没有的 key——两侧合并统计会得到
---    不同的众数。这与 label_compare.build_display_map 的循环顺序一致。
+-- 展示名：每个 key 取出现最多的 clean 值，并列取字典序最小
+-- ⚠️ 必须分两趟：ref 侧先建，cand 侧只补 ref 侧没有的 key（合并统计会得到不同众数）
+--    与 label_compare.build_display_map 的循环顺序一致。
 disp_ref AS (
   SELECT ref_key AS k, ref_clean AS disp, COUNT(*) AS cnt
   FROM keyed WHERE ref_key IS NOT NULL
@@ -708,24 +552,22 @@ LEFT JOIN disp dc ON dc.k = kd.cand_key
 WHERE kd.sample_datetime IN (SELECT DISTINCT sample_datetime FROM model.tmp_eliam_risk_000008_log_run)
 ;
 
--- 首次切增量时建表（借 stage 的 schema，不装数据）；之后每次跑都是 no-op
+-- 首次切增量时建表（只借 schema），之后每次都是 no-op
 CREATE TABLE IF NOT EXISTS model.tmp_eliam_risk_000008_dash_base
 USING PARQUET PARTITIONED BY (sample_datetime)
 AS SELECT * FROM model.tmp_eliam_risk_000008_dash_base_stage WHERE FALSE
 ;
 
--- 每日写入：只替换本批窗口覆盖到的 sample_datetime 分区，历史天不动。
--- 显式 PARTITION (sample_datetime)：目标表若还是旧的非分区表（忘了迁移），这里会当场
--- 报 "table ... is not partitioned"，不会静默按位置写错位数据。
+-- 每日写入：显式 PARTITION (sample_datetime)，只替换本批窗口的分区，历史天不动。
+-- 目标表若还是旧的非分区表（忘了迁移），这里会当场报 "table ... is not partitioned"。
 INSERT OVERWRITE TABLE model.tmp_eliam_risk_000008_dash_base PARTITION (sample_datetime)
 SELECT * FROM model.tmp_eliam_risk_000008_dash_base_stage
 ;
 
 
 -- ---------------------------------------------------------------------------
--- STEP D1  dash_summary  核心指标（**按天**：每天 15 行，按 sample_datetime 分区增量）
---   对应 label_compare.compute_summary_v2——原来口径就是「一批（一天）算一组
---   15 个指标」，现在按 sample_datetime 各算一组，每天 15 行累积在表里。
+-- STEP D1  dash_summary  核心指标（每天 15 行，按 sample_datetime 分区增量）
+--   对应 label_compare.compute_summary_v2：原口径「一批算一组 15 个指标」，现在按天各算一组。
 -- ---------------------------------------------------------------------------
 DROP TABLE IF EXISTS model.tmp_eliam_risk_000008_dash_summary_stage;
 CREATE TABLE model.tmp_eliam_risk_000008_dash_summary_stage
@@ -777,7 +619,7 @@ USING PARQUET PARTITIONED BY (sample_datetime)
 AS SELECT * FROM model.tmp_eliam_risk_000008_dash_summary_stage WHERE FALSE
 ;
 
--- 每日写入：只替换本批窗口覆盖到的 sample_datetime 分区，历史天不动
+-- 每日写入：只替换本批窗口的分区，历史天不动
 INSERT OVERWRITE TABLE model.tmp_eliam_risk_000008_dash_summary PARTITION (sample_datetime)
 SELECT * FROM model.tmp_eliam_risk_000008_dash_summary_stage
 ;
@@ -786,13 +628,9 @@ SELECT * FROM model.tmp_eliam_risk_000008_dash_summary_stage
 -- ---------------------------------------------------------------------------
 -- STEP D2  dash_category  逐 Category 差异（32 列 + sample_datetime = 33 列）
 --   对应 label_compare.compute_category_comparison_v2
---
---   2026-11-13 起不再输出「建议优先级」：类别 P 档由看板自己按业务板块定
---   （monitor.py 的 LEVEL_BY_SEGMENT），上游这套按分位数切 P1/P2/P3 的判定
---   连同切点计算一并删掉。
---
---   **按天**：同一套口径按 sample_datetime 各算一份，
---   行 = （sample_datetime, Category），按 sample_datetime 分区增量。
+--   行 = (sample_datetime, Category)，按天各算一份、按 sample_datetime 分区增量。
+--   2026-11-13 起不再输出「建议优先级」：P 档由看板按业务板块定（monitor.py 的
+--   LEVEL_BY_SEGMENT），上游按分位数切 P1/P2/P3 的判定和切点计算一并删掉。
 -- ---------------------------------------------------------------------------
 DROP TABLE IF EXISTS model.tmp_eliam_risk_000008_dash_category_stage;
 CREATE TABLE model.tmp_eliam_risk_000008_dash_category_stage
@@ -849,9 +687,8 @@ da AS (
   GROUP BY sample_datetime, ref_key
 ),
 -- 「主要流出去向」前三名：ref 侧流出到哪些 cand Category
--- ⚠️ 必须先 GROUP BY 出计数，再在**纯列**上开窗。不要在窗口的 ORDER BY 里直接写
---    COUNT(*)/MIN(row_ord)——那是在聚合结果上再套聚合，Spark 的解析器会报
---    "aggregate function in the argument of another aggregate"。分两层就没有歧义。
+-- ⚠️ 先 GROUP BY 出计数，再在纯列上开窗。窗口 ORDER BY 里直接写 COUNT(*)/MIN(row_ord)
+--    会在聚合结果上再套聚合，Spark 报 "aggregate function in the argument of another aggregate"。
 of_cnt AS (
   SELECT sample_datetime, ref_key AS k, cand_display AS disp,
          COUNT(*) AS cnt, MIN(row_ord) AS min_ord
@@ -902,8 +739,7 @@ if_a AS (
   GROUP BY sample_datetime, k
 ),
 -- 每个 key 的展示名（按天各一份）：ref 侧优先，cand 侧只补 ref 侧没有的 key
--- （dash_base 里 ref_display / cand_display 已经是「该 key 的众数 clean 值」，
---   同一个 key 的每一行都相同，所以 MAX 只是取那一个值）
+-- dash_base 里同一 key 的 ref_display / cand_display 每行都相同，MAX 只是取那一个值
 dr_k AS (
   SELECT sample_datetime, ref_key AS k, MAX(ref_display) AS disp
   FROM src WHERE ref_key IS NOT NULL GROUP BY sample_datetime, ref_key
@@ -981,7 +817,7 @@ derived AS (
   FROM calc c
 ),
 -- 排序：交集占比（并集）升序 -> 并集数量降序 -> Category 升序
--- 累计差异贡献率必须在**排好序之后**再算，所以序号和 cumsum 放在同一个窗口定义里
+-- 累计贡献率必须在排序之后再算，所以序号和 cumsum 放在同一个窗口定义里
 ranked AS (
   SELECT d.*,
     ROW_NUMBER() OVER (PARTITION BY d.sample_datetime
@@ -1040,7 +876,7 @@ USING PARQUET PARTITIONED BY (sample_datetime)
 AS SELECT * FROM model.tmp_eliam_risk_000008_dash_category_stage WHERE FALSE
 ;
 
--- 每日写入：只替换本批窗口覆盖到的 sample_datetime 分区，历史天不动
+-- 每日写入：只替换本批窗口的分区，历史天不动
 INSERT OVERWRITE TABLE model.tmp_eliam_risk_000008_dash_category PARTITION (sample_datetime)
 SELECT * FROM model.tmp_eliam_risk_000008_dash_category_stage
 ;
@@ -1049,13 +885,10 @@ SELECT * FROM model.tmp_eliam_risk_000008_dash_category_stage
 -- ---------------------------------------------------------------------------
 -- STEP D3  dash_flow  差异流向（13 列 + sample_datetime = 14 列）
 --   对应 label_compare.compute_difference_flows
---   **按天**：行 = （sample_datetime, illion×finv×差异类型），按 sample_datetime 分区增量。
---   2026-11-13 起不再输出「排名」与「建议优先级」（原按类别优先级排序），
---   也不再回查 D2。
---
---   注：Python 里 `sql_normalize(rm)` 的 rm 是**展示名**，而「展示名是某个 key 的
---   clean 众数」，且 normalize(clean) 对这个 key 恒等于 key 本身——所以直接用
---   ref_key / cand_key 做关键词判定，与 normalize(展示名) 完全等价。
+--   行 = (sample_datetime, illion×finv×差异类型)，按天各算一份、按 sample_datetime 分区增量。
+--   2026-11-13 起不再输出「排名」「建议优先级」，也不再回查 D2。
+--   注：展示名是某个 key 的 clean 众数，normalize(展示名) 恒等于该 key 本身，
+--   所以直接用 ref_key / cand_key 做关键词判定，与 Python 版完全等价。
 -- ---------------------------------------------------------------------------
 DROP TABLE IF EXISTS model.tmp_eliam_risk_000008_dash_flow_stage;
 CREATE TABLE model.tmp_eliam_risk_000008_dash_flow_stage
@@ -1170,7 +1003,7 @@ USING PARQUET PARTITIONED BY (sample_datetime)
 AS SELECT * FROM model.tmp_eliam_risk_000008_dash_flow_stage WHERE FALSE
 ;
 
--- 每日写入：只替换本批窗口覆盖到的 sample_datetime 分区，历史天不动
+-- 每日写入：只替换本批窗口的分区，历史天不动
 INSERT OVERWRITE TABLE model.tmp_eliam_risk_000008_dash_flow PARTITION (sample_datetime)
 SELECT * FROM model.tmp_eliam_risk_000008_dash_flow_stage
 ;
@@ -1179,12 +1012,9 @@ SELECT * FROM model.tmp_eliam_risk_000008_dash_flow_stage
 -- ---------------------------------------------------------------------------
 -- STEP D4  dash_group  业务大类聚类对比（19 列 + sample_datetime = 20 列）
 --   对应 label_compare.compute_group_comparison
---   **每天** 6 行 = 合计 + 收入类 / 支出类 / 贷款类 / 转账类 / 未分类（合计在最前）
---
---   注：大类判定已固化在 D0 的基座里，关键词按
---   贷款类 -> 转账类 -> 收入类 -> 支出类 的**判定**优先级匹配，先命中先归类；
---   上面这个行序是**展示**顺序，两者不是一回事，别混。
---   **按天**：每天 6 行（合计 + 5 大类），按 sample_datetime 分区增量。
+--   每天 6 行 = 合计 + 收入类 / 支出类 / 贷款类 / 转账类 / 未分类，按此展示顺序。
+--   注：大类判定固化在 D0 基座，按 贷款类 -> 转账类 -> 收入类 -> 支出类 的判定优先级
+--   匹配，先命中先归类——那是判定顺序，上面的行序只是展示顺序，别混。
 -- ---------------------------------------------------------------------------
 DROP TABLE IF EXISTS model.tmp_eliam_risk_000008_dash_group_stage;
 CREATE TABLE model.tmp_eliam_risk_000008_dash_group_stage
@@ -1284,9 +1114,8 @@ cross_a AS (
 ),
 tot AS (SELECT sample_datetime, COUNT(*) AS n FROM src GROUP BY sample_datetime),
 w AS (
-  -- 注意：不能写 a.*，agg 里也有 grp，会和 b.grp 撞名，最终 SELECT 引用 grp 时
-  -- Spark 报 "Reference 'grp' is ambiguous"。这里显式列出 agg 的列并跳过它的 grp。
-  -- 先铺出「天 × 大类」（合计 + 5 类）的笛卡尔，再挂各天各自的计数
+  -- 不能写 a.*：agg 里也有 grp，会和 b.grp 撞名，Spark 报 "Reference 'grp' is ambiguous"。
+  -- 这里显式列出 agg 的列并跳过它的 grp。先铺出「天 × 大类」的笛卡尔，再挂各天计数
   SELECT b.sample_datetime, b.grp, b.ord,
          a.ref_cnt, a.cand_cnt, a.same_g_n, a.exact_g_n, a.diff_cat_n,
          a.ref_only_n, a.cand_only_n, a.cross_n,
@@ -1332,21 +1161,20 @@ USING PARQUET PARTITIONED BY (sample_datetime)
 AS SELECT * FROM model.tmp_eliam_risk_000008_dash_group_stage WHERE FALSE
 ;
 
--- 每日写入：只替换本批窗口覆盖到的 sample_datetime 分区，历史天不动
+-- 每日写入：只替换本批窗口的分区，历史天不动
 INSERT OVERWRITE TABLE model.tmp_eliam_risk_000008_dash_group PARTITION (sample_datetime)
 SELECT * FROM model.tmp_eliam_risk_000008_dash_group_stage
 ;
 
 
 -- ---------------------------------------------------------------------------
--- STEP D5  dash_detail  逐笔排查明细（21 列 + sample_datetime = 22 列）
+-- STEP D5  dash_detail  逐笔排查明细（23 列 + sample_datetime = 24 列）
 --   对应 label_compare.build_difference_details
---   ⚠️ 线上日志没有 account_type / classification_status / engine / rule_id /
---      reason / sample_datetime 这 6 列，所以是 21 列（+ sample_datetime = 22 列）而非
---      原版的 28 列。「排查优先级」2026-11-13 起不再输出，P 档由看板自己定。
+--   ⚠️ 线上日志没有 account_type / classification_status / engine / rule_id / reason
+--      等列，2026-11-13 起也不输出「排查优先级」（P 档由看板定），所以是 21 列而非原版
+--      28 列；2026-11-16 起关联 data.bank_accounts 补回银行名称、银行卡类型，共 23 列。
 --   只出差异行（分类不一致 + 仅 illion 有值 + 仅 finv 有值），双方为空不进。
---   **按天**：每行带自己的 sample_datetime（= 这笔日志的日期），按 sample_datetime 分区增量、
---   历史累积，可以按天筛。
+--   每行带自己的 sample_datetime（= 这笔日志的日期），按天筛。
 -- ---------------------------------------------------------------------------
 DROP TABLE IF EXISTS model.tmp_eliam_risk_000008_dash_detail_stage;
 CREATE TABLE model.tmp_eliam_risk_000008_dash_detail_stage
@@ -1365,12 +1193,22 @@ flow_n AS (
   FROM model.tmp_eliam_risk_000008_dash_flow
   GROUP BY sample_datetime, `illion_Category`, `finv_Category`
 ),
+acct AS (
+  SELECT sample_datetime, bank_account_id, bank, account_type
+  FROM model.tmp_eliam_risk_000008_log_accounts
+  WHERE sample_datetime IN (SELECT DISTINCT sample_datetime FROM model.tmp_eliam_risk_000008_log_run)
+),
 enriched AS (
   SELECT
     d.*,
+    ac.bank,
+    ac.account_type,
     COALESCE(d.ref_display,  '(空)') AS rd,
     COALESCE(d.cand_display, '(空)') AS cd
   FROM diff d
+  LEFT JOIN acct ac
+         ON ac.sample_datetime = d.sample_datetime
+        AND ac.bank_account_id = d.bank_account_id
 ),
 flagged AS (
   SELECT e.*,
@@ -1413,6 +1251,8 @@ SELECT
   rd                                           AS `illion_Category`,
   cd                                           AS `finv_Category`,
   user_id, application_id, transaction_id, job_id, bank_account_id,
+  bank                                         AS `银行名称`,
+  account_type                                 AS `银行卡类型`,
   category                                     AS `illion_Category_原始`,
   bscat                                        AS `finv_Category_原始`,
   CASE match_status
@@ -1430,18 +1270,16 @@ USING PARQUET PARTITIONED BY (sample_datetime)
 AS SELECT * FROM model.tmp_eliam_risk_000008_dash_detail_stage WHERE FALSE
 ;
 
--- 每日写入：只替换本批窗口覆盖到的 sample_datetime 分区，历史天不动
+-- 每日写入：只替换本批窗口的分区，历史天不动
 INSERT OVERWRITE TABLE model.tmp_eliam_risk_000008_dash_detail PARTITION (sample_datetime)
 SELECT * FROM model.tmp_eliam_risk_000008_dash_detail_stage
 ;
 
 
 -- ---------------------------------------------------------------------------
--- STEP D6  dash_trend  按日期的趋势监控（增量：只替换本批窗口的 sample_datetime 分区）
---   线上新增：原 04_模型监控 sheet 靠本地 .monitor/snapshots.jsonl 存历史，
---   线上没有这个文件，改成按 sample_datetime 分批算同一组指标（本版按天累计保留，
---   窗口外的历史天不动）。
---   原版的「引擎命中率趋势」做不了——classification_engine 不在日志里。
+-- STEP D6  dash_trend  按日期的趋势监控（增量：只替换本批窗口的分区）
+--   线上新增：原 04_模型监控 sheet 靠本地 .monitor/snapshots.jsonl 存历史，线上没有这个
+--   文件，改成按 sample_datetime 分批算同一组指标。「引擎命中率趋势」做不了（字段不在日志里）。
 -- ---------------------------------------------------------------------------
 DROP TABLE IF EXISTS model.tmp_eliam_risk_000008_dash_trend_stage;
 CREATE TABLE model.tmp_eliam_risk_000008_dash_trend_stage
