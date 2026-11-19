@@ -3,13 +3,15 @@
 
 前 5 块是看板底表，后 2 块是收入/负债流汇总（只随 zip 归档，monitor.py 不读）。
 monitor.py 默认在启动时调用 sync_all() 自动同步；也可以单独运行本脚本：
-    python src/sync.py
+    python src/sync.py            # 默认同步最近 7 天
+    python src/sync.py --days 30  # 同步最近 30 天
 
 数据库连接由外部 hive_config.query_to_df(sql) 提供，本脚本不负责建连。
 """
 
 from __future__ import annotations
 
+import argparse
 import re
 import sys
 from pathlib import Path
@@ -41,6 +43,10 @@ QUERY_SPECS = (
      "title": "负债流汇总（仅归档）"},
 )
 
+# sync.sql 里共用同一个窗口占位符，运行时替换成实际天数
+DAYS_PLACEHOLDER = "{{days}}"
+DEFAULT_SYNC_DAYS = 7
+
 _BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", flags=re.S)
 _LINE_COMMENT_RE = re.compile(r"--[^\n]*")
 # Evolve 圈选导出的值直接拼进 SQL 字面量，只放行纯 ID / 日期的形状。
@@ -55,14 +61,17 @@ def split_statements(sql_text):
     return [part.strip() for part in body.split(";") if part.strip()]
 
 
-def build_queries():
+def build_queries(days: int = DEFAULT_SYNC_DAYS):
+    if isinstance(days, bool) or not isinstance(days, int) or days < 1:
+        raise ValueError(f"同步天数必须是 >= 1 的整数（当前 {days!r}）")
     statements = split_statements(SQL_FILE.read_text(encoding="utf-8"))
     if len(statements) != len(QUERY_SPECS):
         raise ValueError(
             f"SQL 查询数 {len(statements)} 与 QUERY_SPECS 的 {len(QUERY_SPECS)} 条不一致；"
             "请同步更新 sync.py 的文件清单"
         )
-    return [{**spec, "sql": statement} for spec, statement in zip(QUERY_SPECS, statements)]
+    return [{**spec, "sql": statement.replace(DAYS_PLACEHOLDER, str(days))}
+            for spec, statement in zip(QUERY_SPECS, statements)]
 
 
 def load_query_fn():
@@ -127,10 +136,10 @@ def export_evolve_transactions(application_ids, sample_date, path):
     return rows
 
 
-def sync_all(input_dir: Path = INPUT_DIR) -> int:
+def sync_all(input_dir: Path = INPUT_DIR, days: int = DEFAULT_SYNC_DAYS) -> int:
     """执行全部查询并写入 input_dir；返回 0 表示全部成功。"""
     try:
-        queries = build_queries()
+        queries = build_queries(days)
     except ValueError as exc:
         print(f"同步中止 | {exc}")
         return 2
@@ -142,6 +151,7 @@ def sync_all(input_dir: Path = INPUT_DIR) -> int:
     input_dir = Path(input_dir)
     input_dir.mkdir(parents=True, exist_ok=True)
 
+    print(f"同步窗口：最近 {days} 天（sample_datetime >= current_date - {days}）")
     failed = []
     for index, query in enumerate(queries, start=1):
         path = input_dir / query["file"]
@@ -157,8 +167,12 @@ def sync_all(input_dir: Path = INPUT_DIR) -> int:
     return 1 if failed else 0
 
 
-def main() -> int:
-    return sync_all()
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description="同步 BSCAT 看板底表到 input/")
+    ap.add_argument("--days", type=int, default=DEFAULT_SYNC_DAYS,
+                    help=f"同步最近多少天（默认 {DEFAULT_SYNC_DAYS}）")
+    args = ap.parse_args(argv)
+    return sync_all(days=args.days)
 
 
 if __name__ == "__main__":

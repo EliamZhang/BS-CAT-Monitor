@@ -10,8 +10,9 @@ output/bscat_monitor_<运行时间戳>.html；再按监控结果圈出问题类�
 （含圈选清单）与这个 HTML 一起打包成 bscat_monitor_<同一时间戳>.zip，放在项目根目录。
 
 用法:
-    python monitor.py
-    python monitor.py --skip-sync   # 跳过线上取数，直接用 input/ 现有文件出图
+    python monitor.py                # 启动时询问同步最近多少天（默认 7 天）
+    python monitor.py --days 30      # 直接指定同步天数，不再询问
+    python monitor.py --skip-sync    # 跳过线上取数，直接用 input/ 现有文件出图
 """
 
 from __future__ import annotations
@@ -30,7 +31,7 @@ import pandas as pd
 
 # 同步、模板、规则配置都在 src/ 下，和 monitor.py 分开放
 sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
-from sync import export_evolve_transactions, sync_all
+from sync import DEFAULT_SYNC_DAYS, export_evolve_transactions, sync_all
 
 # Windows 控制台默认 GBK 编码，日志里出现一个 ⚠ 或 ✗，print 就抛 UnicodeEncodeError。
 # 糟的是这类字符恰好都在「出事了要喊一声」的路径上——提醒自己把自己干掉，
@@ -2168,13 +2169,39 @@ def archive_run(root: Path, in_dir: Path, out_html: Path, ts: datetime) -> tuple
     return zip_path, len(csvs)
 
 
+def ask_sync_days(default: int = DEFAULT_SYNC_DAYS) -> int:
+    """询问本次同步的天数；非交互环境（定时任务 / 输入被重定向）直接用默认值。"""
+    if sys.stdin is None or not sys.stdin.isatty():
+        log(f"非交互环境，同步天数取默认值 {default} 天")
+        return default
+    while True:
+        try:
+            raw = input(f"同步最近多少天的数据？直接回车用默认 {default} 天: ").strip()
+        except EOFError:
+            print()
+            return default
+        if not raw:
+            return default
+        try:
+            days = int(raw)
+        except ValueError:
+            days = 0
+        if days >= 1:
+            return days
+        print("请输入 >= 1 的整数天数")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="BSCAT 分类模型效果监控")
     ap.add_argument("--skip-sync", action="store_true",
                     help="跳过线上取数，直接用 input/ 现有文件出图")
+    ap.add_argument("--days", type=int, default=None,
+                    help=f"同步最近多少天；不传则运行时询问（默认 {DEFAULT_SYNC_DAYS}）")
     ap.add_argument("--strict", action="store_true",
                     help="自检不通过时直接失败退出，适合定时任务")
     args = ap.parse_args()
+    if args.days is not None and args.days < 1:
+        ap.error("--days 必须是 >= 1 的整数")
 
     root = Path(__file__).resolve().parent
     in_dir = root / "input"
@@ -2200,8 +2227,9 @@ def main() -> int:
     if args.skip_sync:
         log("跳过线上取数，直接使用 input/ 现有文件")
     else:
-        log(f"同步线上数据 -> {in_dir}")
-        if sync_all(in_dir) != 0:
+        days = args.days if args.days is not None else ask_sync_days()
+        log(f"同步线上最近 {days} 天的数据 -> {in_dir}")
+        if sync_all(in_dir, days=days) != 0:
             raise SystemExit("数据同步失败，已中止；如要直接用 input/ 现有文件出图，加 --skip-sync")
 
     log(f"读取 {in_dir}")
